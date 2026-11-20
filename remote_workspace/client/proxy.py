@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from qgis.core import (
-    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsMemoryProviderUtils, QgsProject,
+    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsField, QgsMemoryProviderUtils, QgsProject,
     QgsRectangle,
     QgsWkbTypes,
 )
 
-from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtCore import QTimer, QVariant
 
 from .rasters import RasterTiles
+from .edits import ClientEdits
+from ..common.edits import IDENTITY
 from ..common.layers import apply_style, apply_tree, opacity, read_style, read_tree, set_opacity, validate_tree
 from ..common.vector import fields_from, geometry_from, unpack
 
@@ -22,6 +24,8 @@ def crs_from(wkt: str, authority: str = ""):
 
 def vector_proxy(name: str, document: dict):
     fields = fields_from(document["fields"])
+    if document.get("editable"):
+        fields.append(QgsField(IDENTITY, QVariant.String, len=36))
     layer = QgsMemoryProviderUtils.createMemoryLayer(
         name, fields, QgsWkbTypes.parseType(document["geometry"]), crs_from(document["crs"])
     )
@@ -29,7 +33,10 @@ def vector_proxy(name: str, document: dict):
     for record in document["features"]:
         feature = QgsFeature(fields)
         feature.setGeometry(geometry_from(record["geometry"]))
-        feature.setAttributes([unpack(value) for value in record["values"]])
+        attrs = [unpack(value) for value in record["values"]]
+        if document.get("editable"):
+            attrs.append(record["id"])
+        feature.setAttributes(attrs)
         features.append(feature)
     ok, _ = layer.dataProvider().addFeatures(features)
     if not ok:
@@ -45,15 +52,18 @@ class Proxies:
         self.connection, self.canvas = connection, canvas
         self.changed, self.failure = changed, failure
         self.tiles = RasterTiles(connection, canvas)
+        self.edits = ClientEdits(self)
         self.project = QgsProject.instance()
         self.layers, self.descriptors = {}, {}
         self.pending = set()
+        self._unavailable = set()
         self.group = None
         self.tree = []
         self.session, self.revision, self.origin = "", -1, ""
         self.remote_project = {}
         self._baseline = None
         self._loading = self._refresh_pending = self._sending = False
+        self._workspace_open = True
         self._view = QTimer(canvas, interval=500, singleShot=True)
         self._view.timeout.connect(self._send_view)
         self._timer = QTimer(canvas, interval=350)
@@ -61,20 +71,29 @@ class Proxies:
         self._timer.start()
         canvas.extentsChanged.connect(self._schedule_view)
         canvas.rotationChanged.connect(self._schedule_view)
+        self.project.cleared.connect(self._local_project_cleared)
         connection.workspace_changed.connect(self.refresh)
         connection.status_changed.connect(self._status)
 
     def _status(self, state, _detail):
         if state == "connected":
             self.revision = -1
+            for key in self.edits.records:
+                if self.edits.working_pending(key):
+                    self.edits.schedule(key)
 
     def refresh(self, revision=None):
+        if not self._workspace_open:
+            return
         if revision == self.revision:
             return
         if self._loading:
             self._refresh_pending = True
             return
         if self.connection.origin != self.origin:
+            if self.edits.has_unrecorded():
+                self.failure("请先提交或撤销本地尚未保存的编辑。")
+                return
             self.clear()
             self.origin = self.connection.origin
         if not self.connection.ready:
@@ -98,8 +117,12 @@ class Proxies:
             return
         new_session = state["session"] != self.session
         if new_session:
+            if self.edits.has_unrecorded():
+                self.failure("工作站项目已重连。请先保存或撤销本地编辑后刷新。")
+                return
             self.clear()
         self.session, self.revision = state["session"], state["revision"]
+        changed_project = state["project"].get("path") != self.remote_project.get("path")
         self.remote_project = state["project"]
         if "tree" in state:
             self.tree = state["tree"]
@@ -110,9 +133,11 @@ class Proxies:
             self.descriptors.pop(key, None)
         for descriptor in state["layers"]:
             self.descriptors[descriptor["id"]] = descriptor
+        self._unavailable.intersection_update(self.descriptors)
         self.tiles.descriptors = [desc for desc in self.descriptors.values() if desc["kind"] == "raster"]
         for identifier, local in tuple(self.layers.items()):
             if identifier not in self.descriptors or not self.project.mapLayer(local):
+                self.edits.detach(identifier)
                 self.layers.pop(identifier)
                 self.project.removeMapLayer(local)
         for identifier, descriptor in self.descriptors.items():
@@ -121,21 +146,29 @@ class Proxies:
                 if descriptor.get("tile_version") and descriptor.get("tile_version") != previous.get(identifier, {}).get("tile_version"):
                     layer.setDataSource(self.tiles.uri(descriptor), descriptor["name"], "wms")
                 self._style(layer, descriptor)
+                before = previous.get(identifier, {})
+                if (descriptor["kind"] == "vector" and descriptor.get("vector_version") != before.get("vector_version")
+                        and not layer.isEditable() and not self.edits.working_pending(identifier)
+                        and identifier not in self.pending and identifier not in self.edits.in_flight):
+                    self._request_vector(identifier)
             elif identifier not in self.pending:
                 if descriptor["kind"] == "raster":
                     try:
                         self._add(identifier, self.tiles.layer(descriptor))
                     except ValueError as exc:
+                        self._unavailable.add(identifier)
                         self.failure(str(exc))
                 else:
-                    self.pending.add(identifier)
-                    self.connection.call("vector", {"id": identifier},
-                                         lambda data, error, key=identifier, session=self.session:
-                                         self._vector(key, session, data, error))
+                    self._request_vector(identifier)
         self._layout()
-        if new_session and state.get("view"):
+        if (new_session or changed_project) and state.get("view"):
             self._initial_view(state["view"])
         self.changed()
+
+    def _request_vector(self, key):
+        self.pending.add(key)
+        self.connection.call("vector", {"id": key},
+                             lambda data, error, session=self.session: self._vector(key, session, data, error))
 
     def _vector(self, identifier, session, data, error):
         if session != self.session:
@@ -145,15 +178,30 @@ class Proxies:
         if descriptor is None:
             return
         if error:
+            self._unavailable.add(identifier)
             if self.connection.ready:
                 self.failure(error)
             return
         try:
-            self._add(identifier, vector_proxy(descriptor["name"], data))
-            self._layout()
-            self.changed()
+            self.install_vector(identifier, data)
         except (TypeError, ValueError, RuntimeError) as exc:
+            self._unavailable.add(identifier)
             self.failure(str(exc))
+
+    def install_vector(self, identifier, document):
+        descriptor = self.descriptors[identifier]
+        working, record = self.edits.restore(descriptor, document)
+        layer = vector_proxy(descriptor["name"], working)
+        old = self.layers.get(identifier)
+        self.edits.detach(identifier)
+        self._add(identifier, layer)
+        self._layout()
+        if old is not None:
+            self.project.removeMapLayer(old)
+        if working.get("editable"):
+            self.edits.attach(identifier, layer, document, record)
+        self._layout()
+        self.changed()
 
     @staticmethod
     def _style(layer, descriptor):
@@ -162,6 +210,7 @@ class Proxies:
         apply_style(layer, descriptor.get("style", ""))
 
     def _add(self, identifier, layer):
+        self._unavailable.discard(identifier)
         layer.setCustomProperty("remoteqgis/id", identifier)
         self._style(layer, self.descriptors[identifier])
         self.project.addMapLayer(layer, False)
@@ -199,12 +248,20 @@ class Proxies:
 
     def _sync_local(self):
         if (not self.connection.ready or self._sending or self._loading or self.pending
-                or self._baseline is None or self.revision < 0):
+                or self._baseline is None or self.revision < 0 or self._unavailable):
             return
         tree, settings = self._read_local()
         if (tree, settings) == self._baseline:
             return
         included, _ = validate_tree(tree, self.descriptors)
+        if self._local_layers().keys() - included:
+            self.failure("请在 RemoteQGIS 分组内排列远端图层。")
+            return
+        for key in self.descriptors.keys() - included:
+            if self.edits.working_pending(key):
+                self.failure("还有编辑等待确认，已保留远端图层。")
+                self._request_vector(key)
+                return
         changed = {key: value for key, value in settings.items()
                    if key in included and value != self._baseline[1].get(key)}
         self._sending = True
@@ -215,6 +272,8 @@ class Proxies:
 
     def _layout_saved(self, result, error):
         self._sending = False
+        if not self.connection.ready:
+            return
         if error:
             self.failure(error)
             self.revision = -1
@@ -251,6 +310,8 @@ class Proxies:
 
     def clear(self):
         self._baseline = None
+        for key in tuple(self.edits.records):
+            self.edits.detach(key)
         self.project.removeMapLayers(list(self.layers.values()))
         if self.group is not None:
             try:
@@ -266,8 +327,22 @@ class Proxies:
         self.descriptors.clear()
         self.tiles.descriptors = []
         self.pending.clear()
+        self._unavailable.clear()
+
+    def _local_project_cleared(self):
+        # A local QGIS project switch removes proxy nodes as a side effect.
+        self.group = None
+        self._baseline = None
+        for key in tuple(self.edits.records):
+            self.edits.detach(key)
+        self.layers.clear()
+        self.revision = -1
+        self._view.stop()
+        QTimer.singleShot(100, self.refresh)
 
     def close(self):
+        self._workspace_open = False
+        self.project.cleared.disconnect(self._local_project_cleared)
         self._timer.stop()
         self._view.stop()
         self._timer.deleteLater()
@@ -277,4 +352,5 @@ class Proxies:
         self.connection.workspace_changed.disconnect(self.refresh)
         self.connection.status_changed.disconnect(self._status)
         self.tiles.close()
+        self.edits.close()
         self.clear()

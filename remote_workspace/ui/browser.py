@@ -11,6 +11,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..client.proxy import Proxies, crs_from
+from .vectors import VectorActions
 
 MIME_PROVIDER = "remoteqgis"
 
@@ -67,6 +68,7 @@ class Browser(QWidget):
         self.tree.setDragEnabled(True)
         self.tree.itemDoubleClicked.connect(self._open)
         self.proxies = Proxies(connection, iface.mapCanvas(), self._refresh_layers, self.show_error)
+        self.vector_actions = VectorActions(self)
         self.drop_handler = RemoteDropHandler(self)
         iface.registerCustomDropHandler(self.drop_handler)
         self.entries = []
@@ -99,6 +101,11 @@ class Browser(QWidget):
         self._pixel_tool.canvasClicked.connect(self._pixel_clicked)
         self._pixel_target = None
         self._previous_tool = None
+        vector = QHBoxLayout()
+        vector.addWidget(self._button("新建矢量", self.vector_actions.create))
+        vector.addWidget(self._button("启用编辑", self.vector_actions.enable))
+        vector.addWidget(self._button("保存或重试编辑", self.vector_actions.save))
+        layout.addLayout(vector)
         self.layers_status = QLabel()
         layout.addWidget(self.layers_status)
         layout.addWidget(self.message)
@@ -117,7 +124,7 @@ class Browser(QWidget):
         if ready:
             directory = self.directory if self.proxies.origin == self.connection.origin else ""
             self.browse(directory)
-        if state in ("idle", "error"):
+        if state in ("idle", "error") and not self.proxies.edits.has_unrecorded():
             self.proxies.clear()
 
     def show_error(self, message):
@@ -126,7 +133,9 @@ class Browser(QWidget):
     def _refresh_layers(self):
         project = self.proxies.remote_project
         name = project.get("title") or PurePosixPath(project.get("path") or "未命名项目").stem
-        self.layers_status.setText(f"{name} · {len(self.proxies.layers)} 个代理图层")
+        pending = sum(self.proxies.edits.working_pending(key) for key in self.proxies.edits.records)
+        suffix = f" · {pending} 个图层待工作站确认" if pending else ""
+        self.layers_status.setText(f"{name} · {len(self.proxies.layers)} 个代理图层{suffix}")
 
     def browse(self, path: str):
         path = path.strip().strip("/")
@@ -237,6 +246,9 @@ class Browser(QWidget):
             path = self.target(name if PurePosixPath(name).suffix else name + ".qgz")
         data = {"action": action, "path": path}
         if action in ("open", "close", "create"):
+            if self.proxies.edits.has_unsaved():
+                self.show_error("请先保存或处理本地矢量编辑，再切换远端项目。")
+                return
             answer = QMessageBox.question(self, "切换远端项目", "继续后，工作站项目未保存的图层配置将被放弃。",
                                           QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:

@@ -1,26 +1,23 @@
-# RemoteQGIS V0.1 验证记录
+# RemoteQGIS 验证记录
 
-2026-11-20。平台为 macOS 15.7.3，QGIS Desktop 3.40.4 LTR，内置 Python 3.9.5、Qt 5.15.2、PyQt 5.15.4 和 GDAL 3.3.2。
+2026-11-20。本机环境为 macOS 15.7.3，QGIS Desktop 3.40.4 LTR，内置 Python 3.9.5、Qt 5.15.2、PyQt 5.15.4 和 GDAL 3.3.2。
 
-| 验证类别 | 结果 |
+| 范围 | 验证结果 |
 | --- | --- |
-| 独立单元测试 | 五项通过，覆盖 HTTP 与事件消息、消息结构和长度校验、访问令牌及 Host 配置。 |
-| QGIS 原生 ZIP 安装 | 两个独立的 QGIS Desktop 实例分别通过 QGIS 插件安装器安装同一份 ZIP，均可从插件菜单打开面板。 |
-| 本机双端连接 | 使用回环网络，验证 HTTP 项目摘要、拒绝错误令牌、WebSocket 握手鉴权、拒绝浏览器 Origin、显示心跳延迟及项目变化推送。 |
-| 故障与恢复 | 使用不响应的 TCP 监听器验证客户端请求超时。验证工作站端口占用后的重新启动、停止期间的客户端提示、重启后的自动重连，以及卸载后端口释放。 |
-| Windows 实际环境及广域网 | 待使用 Windows QGIS 工作站与 macOS 客户端验收。 |
-| 远程文件与 GIS 操作 | 远程目录、数据导入、遥感影像分块访问、项目保存、编辑事务和 Processing 属于后续阶段。 |
+| 单元测试 | 覆盖消息结构、认证令牌、共享路径、Shapefile 副文件、编辑差量和本地恢复文件。 |
+| V0.1 | 在两个独立 QGIS Desktop 用户配置中从 ZIP 安装，验证 HTTP、WebSocket、认证失败、请求超时、心跳、重启重连和端口释放。 |
+| V0.2 | 在共享目录导入 GeoTIFF、GeoPackage 和 Shapefile，覆盖多选导入、原生拖放数据格式和自定义画布处理入口，核对工作站真实数据路径与本地矢量内容。 |
+| V0.3 | 使用带概览的 4096 × 4096 三波段合成 GeoTIFF，验证原生 XYZ 提供器读取渲染瓦片、波段和拉伸切换产生新瓦片版本，以及独立原始像元数值。 |
+| V0.4 | 验证图层分组、名称、透明度、符号、视野旋转，以及项目保存、关闭和重新打开后状态保持。 |
+| V0.5 | 验证既有两种矢量格式、新建 GeoPackage 面图层、绘制与编辑几何、属性和字段、撤销重做、失败的 GeoPackage 事务回滚、本地断线记录、重连提交、重复事务识别，并使用 OGR 回读工作站真实文件。 |
+| Windows 与广域网 | 待使用真实 Windows QGIS 工作站与 macOS 客户端验收，包括文件锁、长路径、Tailscale 直连或中继、实际大型影像平移与缩放。 |
 
 ## 复现
 
 ```sh
 python3 -m unittest discover -s tests/unit -v
 python3 scripts/build_plugin.py
-python3 scripts/test_desktop.py --qgis /Applications/QGIS-LTR.app/Contents/MacOS/QGIS --zip dist/RemoteQGIS-0.1.0.zip
+python3 scripts/test_desktop.py --stage 5 --qgis /Applications/QGIS-LTR.app/Contents/MacOS/QGIS --zip dist/RemoteQGIS-0.5.0.zip
 ```
 
-集成测试使用临时 QGIS 用户配置和测试令牌。该 macOS 发行包运行桌面测试时使用默认窗口后端，Qt offscreen 后端无法初始化桌面 OpenGL。
-
-## Windows 与 macOS 实机验收
-
-在 Windows QGIS 使用同一个 ZIP 安装并打开 Host 面板，绑定工作站的 Tailscale IP，选择共享目录并启动。macOS 在同一 tailnet 内填入 Windows IP、端口和令牌，检查远端系统、版本及项目名。依次验证拒绝错误令牌、更新 Windows 项目标题和重启 Host 后的状态变化。验收时记录 Windows 的 QGIS、Qt 和 Python 版本，以及连接使用的 Tailscale 直连或中继方式。
+集成测试使用临时 QGIS 用户配置、测试令牌和自动生成的数据。两个 QGIS Desktop 实例通过应用自身的 ZIP 插件安装器启动插件。测试使用 macOS 默认窗口后端。

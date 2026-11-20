@@ -1,5 +1,7 @@
 # RemoteQGIS 技术选型与架构
 
+本页记录 V0.1 建立的技术基线和阶段计划。V0.2–V0.5 的实现细节见 [工作区模块](workspace.md)。
+
 ## 开发环境及兼容性
 
 2026-11-20 在 macOS 15.7.3（Apple Silicon）检查了 `/Applications/QGIS-LTR.app`。该应用是 x86_64 版本，内置 QGIS 3.40.4-Bratislava、Python 3.9.5、Qt 5.15.2、PyQt 5.15.4 和 GDAL 3.3.2。实测可导入 PyQGIS、Qt Network、PyQt5.QtWebSockets 及 GDAL Python 绑定。Qt WebSockets 在该发行包中由 `PyQt5.QtWebSockets` 提供，因此导入优先使用 QGIS 的 Qt 包装层，并为这类发行包保留回退入口。开发测试同时使用了实际 QGIS Desktop 进程与系统 Python，二者各自加载对应的依赖。

@@ -16,13 +16,14 @@ from qgis.core import (
 from ..common.layers import apply_style, apply_tree, opacity, read_style, read_tree, set_opacity, validate_settings, validate_tree
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 from .files import SharedFiles
-from .vectors import snapshot
+from .vectors import VectorEdits, digest, snapshot
 from .rasters import RESAMPLING, file_stamp
 from .project_files import ProjectFiles
 
 
 def bounds(rectangle):
-    return [rectangle.xMinimum(), rectangle.yMinimum(), rectangle.xMaximum(), rectangle.yMaximum()]
+    values = [rectangle.xMinimum(), rectangle.yMinimum(), rectangle.xMaximum(), rectangle.yMaximum()]
+    return values if all(math.isfinite(value) for value in values) else [0.0] * 4
 
 
 class HostWorkspace:
@@ -35,13 +36,15 @@ class HostWorkspace:
         self._history = {}
         self._document = None
         self.project_files = ProjectFiles(self.files, self.project, canvas)
+        self.edits = VectorEdits(self)
         self.rasters = {}
 
     def execute(self, operation: str, data: dict):
         operations = {
             "files": self.list_files, "import": self.import_files, "state": self.state,
             "vector": self.vector, "render": self.render, "project": self.project_files,
-            "layout": self.layout, "view": self.view, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
+            "layout": self.layout, "view": self.view, "enable_edit": self.edits.enable,
+            "create_vector": self.edits.create, "edit": self.edits.commit, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
         }
         handler = operations.get(operation)
         if handler is None:
@@ -74,7 +77,7 @@ class HostWorkspace:
     def rename(self, data):
         path = self.files.path(data.get("path"))
         target = self.files.path(data.get("target"), exists=False)
-        if path.parent != target.parent or path.suffix.lower() != target.suffix.lower():
+        if path.parent != target.parent or path.is_file() and path.suffix.lower() != target.suffix.lower():
             raise WorkspaceError("重命名须保留目录和文件扩展名。")
         self._busy(path)
         self.files.move(path, target)
@@ -166,6 +169,10 @@ class HostWorkspace:
             spec = self.raster_spec(layer, path)
             metadata.update(tile_version=spec["version"], render={key: spec[key] for key in
                             ("bands", "stretch", "resample", "nodata")})
+        else:
+            stats = [(part.name, part.stat().st_mtime_ns, part.stat().st_size)
+                     for part in self.files.parts(path) if not part.name.endswith("-shm")]
+            metadata["vector_version"] = digest(sorted(stats))
         return metadata
 
     def raster_spec(self, layer, path):
@@ -227,6 +234,7 @@ class HostWorkspace:
             enhance.setMinimumValue(pair[0])
             enhance.setMaximumValue(pair[1])
             setter(enhance)
+        renderer.setOpacity(opacity(layer))
         layer.setRenderer(renderer)
         layer.setCustomProperty("remoteqgis/resample", resample)
         if nodata is None:
@@ -242,7 +250,7 @@ class HostWorkspace:
         return {
             "crs": settings.destinationCrs().authid() or settings.destinationCrs().toWkt(),
             "extent": bounds(self.canvas.extent()), "rotation": self.canvas.rotation(),
-            "scale": self.canvas.scale(),
+            "scale": self.canvas.scale() if math.isfinite(self.canvas.scale()) else None,
         }
 
     def view(self, data):
@@ -302,7 +310,7 @@ class HostWorkspace:
             "session": self.session, "revision": self.revision, "full": previous is None,
             "layers": [value for key, value in current["layers"].items() if before.get(key) != value],
             "removed": list(before.keys() - current["layers"].keys()),
-            "view": self.current_view() if previous is None else None,
+            "view": self.current_view() if previous is None or previous["project"]["path"] != current["project"]["path"] else None,
             "project": current["project"],
         }
         if previous is None or previous["tree"] != current["tree"]:

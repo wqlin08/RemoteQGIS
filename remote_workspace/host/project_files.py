@@ -86,6 +86,8 @@ class ProjectFiles:
                 raise ValueError
         except (OSError, ValueError, ElementTree.ParseError, BadZipFile) as exc:
             raise WorkspaceError("项目文件无效或超出读取限制。") from exc
+        if (project.findtext("./properties/Macros/pythonCode") or "").strip():
+            raise WorkspaceError("含有 Python 宏的项目须在工作站本地打开。")
         for layer in project.findall("./projectlayers/maplayer"):
             provider, source = layer.findtext("provider"), layer.findtext("datasource")
             uri = QgsProviderRegistry.instance().decodeUri(provider or "", source or "") \

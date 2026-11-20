@@ -2,9 +2,12 @@
 
 """Synthetic, shared-directory fixtures for the native two-session scenario."""
 
+from uuid import uuid4
+
 from osgeo import gdal, ogr, osr
 
-from qgis.core import QgsMimeDataUtils, QgsRasterLayer, QgsRectangle, QgsVectorLayer
+from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsMimeDataUtils, QgsRasterLayer, QgsRectangle, QgsVectorLayer
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QColor
 
 
@@ -129,7 +132,108 @@ class Scenario:
             assert proxies.group.findLayer(layer.id()).parent().name() == "远程数据组"
             self.mark("project-verified")
             self.step = 13
-        return self.step == 13
+        if self.step == 13:
+            if self.version < 5:
+                return True
+            self.shp = self._key("points.shp")
+            self.gpkg = self._key("points.gpkg")
+            self.enabled = set()
+            self._rollback_requested = False
+            self._rollback_verified = False
+            self.step = 14
+            for key in (self.shp, self.gpkg):
+                self.connection.call("enable_edit", {"id": key},
+                                     lambda doc, error, k=key: self._enabled(k, doc, error))
+        if self.step == 14 and len(self.enabled) == 2 and not proxies.pending:
+            if not self._rollback_requested:
+                self._rollback_requested = True
+                descriptor = proxies.descriptors[self.gpkg]
+                base = proxies.edits.records[self.gpkg][1]
+                self.rollback_revision = base["revision"]
+                self.connection.call("edit", {
+                    "id": self.gpkg, "dataset": [descriptor["path"], descriptor["table"]],
+                    "base": base["revision"], "transaction": str(uuid4()),
+                    "fields": base["fields"] + [["test_rev", 2, 0, 0, 0]],
+                    "delete": [base["features"][0]["id"]], "update": [],
+                    "add": [{"id": str(uuid4()), "geometry": "invalid-wkb", "values": ["bad", 1]}],
+                }, self._invalid_edit)
+                return False
+            if not self._rollback_verified:
+                return False
+            layer = proxies._local_layers()[self.shp]
+            assert layer.startEditing()
+            old = next(layer.getFeatures())
+            assert layer.deleteFeature(old.id())
+            assert layer.addAttribute(QgsField("score", QVariant.Int))
+            item = QgsFeature(layer.fields())
+            item["name"] = "shapefile"
+            item["score"] = 7
+            item.setGeometry(QgsGeometry.fromWkt("Point (2 2)"))
+            assert layer.addFeature(item)
+            assert layer.commitChanges(), layer.commitErrors()
+            self.step = 15
+        if self.step == 15:
+            layer = proxies._local_layers()[self.shp]
+            if proxies.edits.working_pending(self.shp) or layer.readOnly():
+                return False
+            feature = next(layer.getFeatures())
+            if feature["name"] != "shapefile" or feature["score"] != 7:
+                return False
+            self.mark("shapefile-verified")
+            layer = proxies._local_layers()[self.gpkg]
+            assert layer.startEditing()
+            original = next(layer.getFeatures())
+            self.gpkg_uuid = original["rq_uuid"]
+            layer.beginEditCommand("Move point")
+            assert layer.changeGeometry(original.id(), QgsGeometry.fromWkt("Point (0 0)"))
+            assert layer.changeAttributeValue(original.id(), layer.fields().indexFromName("name"), "offline")
+            layer.endEditCommand()
+            layer.undoStack().undo()
+            assert next(layer.getFeatures())["name"] == "demo"
+            layer.undoStack().redo()
+            assert next(layer.getFeatures())["name"] == "offline"
+            self.mark("edit-disconnect")
+            self.step = 16
+        if self.step == 16 and not self.connection.ready:
+            layer = proxies._local_layers()[self.gpkg]
+            assert layer.commitChanges(), layer.commitErrors()
+            path = proxies.edits.path(proxies.descriptors[self.gpkg])
+            assert path.exists(), "Pending edit was not written before local commit"
+            self.saved_patch = proxies.edits.recovery.read(path)["patch"]
+            self.mark("edit-journal-written")
+            self.step = 17
+        if self.step == 17 and self.connection.ready and self.gpkg in proxies.edits.records:
+            if proxies.edits.working_pending(self.gpkg):
+                return False
+            layer = proxies._local_layers()[self.gpkg]
+            feature = next(layer.getFeatures())
+            if feature["name"] != "offline":
+                return False
+            assert feature["rq_uuid"] == self.gpkg_uuid
+            assert feature.geometry().asWkt() == "Point (0 0)"
+            self.step = 18
+            self.connection.call("edit", dict(self.saved_patch, id=self.gpkg), self._replayed)
+        if self.step == 19 and not proxies.pending:
+            layer = next((layer for layer in proxies._local_layers().values() if layer.name() == "新建面"), None)
+            if layer is None:
+                return False
+            self.new_id = layer.customProperty("remoteqgis/id")
+            assert layer.startEditing()
+            feature = QgsFeature(layer.fields())
+            feature["value"] = 42
+            feature.setGeometry(QgsGeometry.fromWkt("Polygon ((0 0, 0 1, 1 1, 1 0, 0 0))"))
+            assert layer.addFeature(feature)
+            assert layer.commitChanges(), layer.commitErrors()
+            self.step = 20
+        if self.step == 20 and not proxies.edits.working_pending(self.new_id):
+            layer = proxies._local_layers()[self.new_id]
+            assert layer.featureCount() == 1 and next(layer.getFeatures())["value"] == 42
+            self.mark("vector-verified")
+            self.step = 21
+        if self.step == 21 and (self.root / "vector-host-verified").exists():
+            self.step = 22
+            self.connection.call("project", {"action": "save"}, self._final_save)
+        return self.step == 24
 
     def _path_test(self, result, error):
         assert error and result is None
@@ -160,3 +264,41 @@ class Scenario:
         assert not error, error
         self.browser.proxies.refresh()
         self.step = 12
+
+    def _key(self, suffix):
+        return next(key for key, desc in self.browser.proxies.descriptors.items() if desc["path"].endswith(suffix))
+
+    def _enabled(self, key, doc, error):
+        assert not error, error
+        assert doc["editable"]
+        self.browser.proxies.install_vector(key, doc)
+        self.enabled.add(key)
+
+    def _replayed(self, doc, error):
+        assert not error and len(doc["features"]) == 1, (doc, error)
+        self.connection.call("create_vector", {"path": "测试数据/新建面.gpkg", "crs": "EPSG:4326",
+                                               "geometry": "Polygon", "fields": [["value", 2, 0, 0, 0]]},
+                             self._created)
+
+    def _created(self, _, error):
+        assert not error, error
+        self.browser.proxies.refresh()
+        self.step = 19
+
+    def _final_save(self, _, error):
+        assert not error, error
+        self.connection.call("project", {"action": "create", "path": "测试数据/空项目.qgz",
+                                         "discard": True}, self._final_project)
+
+    def _final_project(self, _, error):
+        assert not error, error
+        assert (self.root / "shared" / "测试数据" / "空项目.qgz").exists()
+        self.step = 24
+
+    def _invalid_edit(self, result, error):
+        assert result is None and error, (result, error)
+        self.connection.call("vector", {"id": self.gpkg}, self._verify_rollback)
+
+    def _verify_rollback(self, result, error):
+        assert not error and result["revision"] == self.rollback_revision, (result, error)
+        self._rollback_verified = True

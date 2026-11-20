@@ -129,7 +129,7 @@ def apply_tree(root, tree, layers, manage_groups=True):
         for index, item in enumerate(items):
             if "group" in item:
                 key = item["group"]
-                node = next((group for group in root.findGroups() if group.customProperty(GROUP_ID) == key), None)
+                node = next((group for group in root.findGroups(True) if group.customProperty(GROUP_ID) == key), None)
                 if node is None or is_ancestor(node, parent):
                     node = parent.insertGroup(index, item["name"])
                     node.setCustomProperty(GROUP_ID, key)
@@ -145,7 +145,7 @@ def apply_tree(root, tree, layers, manage_groups=True):
 
     build(root, tree)
     if manage_groups:
-        for group in reversed(root.findGroups()):
+        for group in reversed(root.findGroups(True)):
             if group.customProperty(GROUP_ID) not in groups and not group.children():
                 group.parent().removeChildNode(group)
     return wanted

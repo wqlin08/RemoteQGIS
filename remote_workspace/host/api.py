@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import suppress
+from concurrent.futures import ThreadPoolExecutor
 import json
 from typing import Set
 
@@ -104,7 +105,7 @@ class HostAPI:
         self.token = token
         self.state = state
         self.dispatcher = dispatcher
-        self._raster_workers = asyncio.Semaphore(4)
+        self._raster_workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="RemoteQGIS raster")
         self.clients: Set[EventsHandler] = set()
         self._sending = set()
         self.application = Application(
@@ -125,8 +126,7 @@ class HostAPI:
         return dict(self.state[0].message(event=True), revision=self.state[1])
 
     async def tile_job(self, function, *args):
-        async with self._raster_workers:
-            return await asyncio.to_thread(function, *args)
+        return await asyncio.get_running_loop().run_in_executor(self._raster_workers, function, *args)
 
     async def call(self, operation: str, arguments: dict):
         if operation == "pixel":
@@ -161,6 +161,7 @@ class HostAPI:
             self._sending.discard(client)
 
     async def close(self):
+        self._raster_workers.shutdown(wait=False, cancel_futures=True)
         for client in tuple(self.clients):
             client.close(1001, "Host stopped")
         deadline = asyncio.get_running_loop().time() + 1

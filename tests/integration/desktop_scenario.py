@@ -107,6 +107,27 @@ def host_tick():
             assert layer.renderer().symbol().color().name() == "#a33b87"
             assert project.layerTreeRoot().findLayer(layer.id()).parent().name() == "远程数据组"
             mark("project-layout-verified")
+    if stage == 4 and version == 5 and (root / "edit-disconnect").exists() and not (root / "edit-host-stopped").exists():
+        panel.stop_host.click()
+        mark("edit-host-stopped")
+    if stage == 4 and version == 5 and (root / "edit-journal-written").exists() and not (root / "edit-host-restarted").exists():
+        if panel._host_state == "stopped":
+            panel.start_host.click()
+            mark("edit-host-restarted")
+    if stage == 4 and version == 5 and (root / "vector-verified").exists() and not (root / "vector-host-verified").exists():
+        from osgeo import ogr
+
+        data = root / "shared" / "测试数据"
+        for filename, attr, expected in (("points.gpkg", "name", "offline"),
+                                          ("points.shp", "score", 7), ("新建面.gpkg", "value", 42)):
+            dataset = ogr.Open(str(data / filename))
+            layer = dataset.GetLayer(0)
+            assert layer.GetFeatureCount() == 1
+            feature = next(iter(layer))
+            assert feature.GetField(attr) == expected
+            assert len(feature.GetField("rq_uuid")) == 36
+            layer = feature = dataset = None
+        mark("vector-host-verified")
     if stage == 4 and (root / "finish").exists():
         service = panel._host
         assert utils.unloadPlugin(key)
@@ -149,6 +170,8 @@ def client_tick():
         assert labels == ["—"] * 5, labels
         mark("client-retry")
         stage = 4
+    if stage == 4 and version == 5 and scenario.step == 16 and state == "retry":
+        scenario.tick()
     if stage == 4 and state == "connected" and (labels[3] == "测试项目 · 服务重启"
                                                    or version > 1 and scenario.step > 0):
         if version > 1 and not scenario.tick():

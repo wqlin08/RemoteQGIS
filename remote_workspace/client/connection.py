@@ -104,8 +104,12 @@ class Connection(QObject):
         if not self._ready:
             callback(None, "工作站未连接。")
             return
-        body = json.dumps({"operation": operation, "data": arguments}, ensure_ascii=False,
-                          allow_nan=False).encode("utf-8")
+        try:
+            body = json.dumps({"operation": operation, "data": arguments}, ensure_ascii=False,
+                              allow_nan=False).encode("utf-8")
+        except (ValueError, TypeError, UnicodeError):
+            callback(None, "请求包含无效参数。")
+            return
         if len(body) > MAX_DOCUMENT:
             callback(None, "请求超过传输大小限制。")
             return
@@ -269,6 +273,8 @@ class Connection(QObject):
         self._clear_channels()
         self._url = None
         self._token = ""
+        for reply in tuple(self._requests):
+            reply.abort()
 
     def _fail(self, detail: str, state: str = "error"):
         self._reset()
