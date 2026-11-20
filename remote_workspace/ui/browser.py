@@ -7,7 +7,7 @@ from qgis.gui import QgsCustomDropHandler, QgsMapToolEmitPoint
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..client.proxy import Proxies, crs_from
@@ -82,6 +82,13 @@ class Browser(QWidget):
         for title, slot in (("导入", self.import_selected), ("新建目录", self.mkdir),
                             ("重命名", self.rename), ("删除", self.delete)):
             actions.addWidget(self._button(title, slot))
+        project_button = QPushButton("远端项目")
+        menu = QMenu(project_button)
+        for title, action in (("新建项目…", "create"), ("打开所选项目", "open"), ("保存项目", "save"),
+                              ("另存项目…", "save_as"), ("关闭项目", "close")):
+            menu.addAction(title, lambda operation=action: self.project_action(operation))
+        project_button.setMenu(menu)
+        actions.addWidget(project_button)
         layout.addLayout(actions)
         image = QHBoxLayout()
         image.addWidget(self._button("影像范围", self._zoom_raster))
@@ -117,7 +124,9 @@ class Browser(QWidget):
         self.message.setText(message)
 
     def _refresh_layers(self):
-        self.layers_status.setText(f"已加载 {len(self.proxies.layers)} 个远端代理图层")
+        project = self.proxies.remote_project
+        name = project.get("title") or PurePosixPath(project.get("path") or "未命名项目").stem
+        self.layers_status.setText(f"{name} · {len(self.proxies.layers)} 个代理图层")
 
     def browse(self, path: str):
         path = path.strip().strip("/")
@@ -152,6 +161,8 @@ class Browser(QWidget):
         entry = item.data(0, Qt.UserRole)
         if entry["kind"] == "directory":
             self.browse(entry["path"])
+        elif entry["kind"] == "project":
+            self.project_action("open", entry["path"])
         elif entry["kind"] in ("vector", "raster"):
             self.import_paths([entry["path"]])
 
@@ -210,6 +221,35 @@ class Browser(QWidget):
     def _file_operation(self, operation, data):
         self.connection.call(operation, data, lambda _, error: self.show_error(error) if error
                              else self.browse(self.directory))
+
+    def project_action(self, action, path=None):
+        if action == "open" and not path:
+            chosen = self.selected()
+            if len(chosen) != 1 or chosen[0]["kind"] != "project":
+                self.show_error("请选择一个远端 QGIS 项目。")
+                return
+            path = chosen[0]["path"]
+        if action in ("create", "save_as"):
+            name, ok = QInputDialog.getText(self, "远端项目路径", "当前目录下的文件名（.qgz 或 .qgs）")
+            if not ok or not name.strip():
+                return
+            name = name.strip()
+            path = self.target(name if PurePosixPath(name).suffix else name + ".qgz")
+        data = {"action": action, "path": path}
+        if action in ("open", "close", "create"):
+            answer = QMessageBox.question(self, "切换远端项目", "继续后，工作站项目未保存的图层配置将被放弃。",
+                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+            data["discard"] = True
+        self.connection.call("project", data, self._project_done)
+
+    def _project_done(self, _, error):
+        if error:
+            self.show_error(error)
+        else:
+            self.browse(self.directory)
+            self.proxies.refresh()
 
     def active_descriptor(self, kind):
         layer = self.iface.activeLayer()
@@ -310,6 +350,5 @@ class Browser(QWidget):
 
     def shutdown(self):
         self._restore_tool()
-        self.proxies.tiles.close()
+        self.proxies.close()
         self.iface.unregisterCustomDropHandler(self.drop_handler)
-        self.proxies.clear()

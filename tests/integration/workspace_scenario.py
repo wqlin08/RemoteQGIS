@@ -5,7 +5,7 @@
 from osgeo import gdal, ogr, osr
 
 from qgis.core import QgsMimeDataUtils, QgsRasterLayer, QgsRectangle, QgsVectorLayer
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 
 
 def fixtures(root, version):
@@ -100,7 +100,36 @@ class Scenario:
             assert (color >> 24) == 255 and 120 <= (color & 255) <= 135, hex(color)
             self.mark("raster-verified")
             self.step = 7
-        return self.step == 7
+        if self.step == 7:
+            if self.version < 4:
+                return True
+            vector_key, = [key for key, desc in proxies.descriptors.items() if desc["path"].endswith(".gpkg")]
+            layer = proxies.project.mapLayer(proxies.layers[vector_key])
+            layer.setName("远程点样式")
+            layer.setOpacity(0.55)
+            layer.renderer().symbol().setColor(QColor("#a33b87"))
+            item = proxies.group.findLayer(layer.id())
+            group = proxies.group.insertGroup(0, "远程数据组")
+            group.addChildNode(item.clone())
+            item.parent().removeChildNode(item)
+            self.panel.iface.mapCanvas().setRotation(12)
+            self.step = 8
+        if self.step == 8 and (self.root / "project-layout-verified").exists():
+            self.step = 9
+            self.connection.call("project", {"action": "save_as", "path": "测试数据/远程.qgz"},
+                                 self._project_saved)
+        if self.step == 10 and not proxies.descriptors:
+            self.step = 11
+            self.connection.call("project", {"action": "open", "path": "测试数据/远程.qgz",
+                                             "discard": True}, self._project_reopened)
+        if self.step == 12 and len(proxies.layers) == 3:
+            layer = next(l for l in proxies._local_layers().values() if l.name() == "远程点样式")
+            assert abs(layer.opacity() - 0.55) < 1e-6
+            assert layer.renderer().symbol().color().name() == "#a33b87"
+            assert proxies.group.findLayer(layer.id()).parent().name() == "远程数据组"
+            self.mark("project-verified")
+            self.step = 13
+        return self.step == 13
 
     def _path_test(self, result, error):
         assert error and result is None
@@ -116,3 +145,18 @@ class Scenario:
         assert not error, error
         self.browser.proxies.refresh()
         self.step = 6
+
+    def _project_saved(self, _, error):
+        assert not error, error
+        assert (self.root / "shared" / "测试数据" / "远程.qgz").exists()
+        self.connection.call("project", {"action": "close", "discard": True}, self._project_closed)
+
+    def _project_closed(self, _, error):
+        assert not error, error
+        self.browser.proxies.refresh()
+        self.step = 10
+
+    def _project_reopened(self, _, error):
+        assert not error, error
+        self.browser.proxies.refresh()
+        self.step = 12

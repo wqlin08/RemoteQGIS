@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from pathlib import Path
+from uuid import uuid4
 from hashlib import sha256
 import json
 import math
 
 from qgis.core import (
-    QgsProject, QgsRasterLayer, QgsVectorLayer, QgsMultiBandColorRenderer,
+    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject, QgsRasterLayer,
+    QgsRectangle, QgsVectorLayer, QgsMultiBandColorRenderer,
     QgsSingleBandGrayRenderer, QgsContrastEnhancement,
     QgsProviderRegistry, QgsWkbTypes,
 )
 
+from ..common.layers import apply_style, apply_tree, opacity, read_style, read_tree, set_opacity, validate_settings, validate_tree
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 from .files import SharedFiles
 from .vectors import snapshot
 from .rasters import RESAMPLING, file_stamp
+from .project_files import ProjectFiles
 
 
 def bounds(rectangle):
@@ -27,13 +31,17 @@ class HostWorkspace:
         self.project = QgsProject.instance()
         self.canvas = canvas
         self.revision = 0
-        self._fingerprint = None
+        self.session = uuid4().hex
+        self._history = {}
+        self._document = None
+        self.project_files = ProjectFiles(self.files, self.project, canvas)
         self.rasters = {}
 
     def execute(self, operation: str, data: dict):
         operations = {
             "files": self.list_files, "import": self.import_files, "state": self.state,
-            "vector": self.vector, "render": self.render, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
+            "vector": self.vector, "render": self.render, "project": self.project_files,
+            "layout": self.layout, "view": self.view, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
         }
         handler = operations.get(operation)
         if handler is None:
@@ -148,6 +156,7 @@ class HostWorkspace:
             "path": self.files.relative(path), "table": table or "", "crs": layer.crs().authid(),
             "wkt": layer.crs().toWkt(), "bounds": bounds(layer.extent()),
             "visible": node.itemVisibilityChecked() if node else True,
+            "opacity": opacity(layer), "style": read_style(layer),
             "bands": layer.bandCount() if raster else 0,
             "geometry": "" if raster else QgsWkbTypes.displayString(layer.wkbType()),
             "fields": [] if raster else [field.name() for field in layer.fields()],
@@ -225,28 +234,105 @@ class HostWorkspace:
         else:
             layer.setCustomProperty("remoteqgis/nodata", nodata)
         layer.triggerRepaint()
+        self.project.setDirty(True)
         return {}
 
+    def current_view(self):
+        settings = self.canvas.mapSettings()
+        return {
+            "crs": settings.destinationCrs().authid() or settings.destinationCrs().toWkt(),
+            "extent": bounds(self.canvas.extent()), "rotation": self.canvas.rotation(),
+            "scale": self.canvas.scale(),
+        }
+
+    def view(self, data):
+        values, angle = data.get("extent"), data.get("rotation")
+        if not isinstance(values, list) or len(values) != 4 or any(
+            type(value) not in (float, int) or not math.isfinite(value) for value in [*values, angle]
+        ) or values[0] >= values[2] or values[1] >= values[3]:
+            raise WorkspaceError("地图视野无效。")
+        crs = data.get("crs")
+        if not isinstance(crs, str) or len(crs) > 100000:
+            raise WorkspaceError("地图坐标系无效。")
+        source = QgsCoordinateReferenceSystem()
+        if not source.createFromUserInput(crs):
+            raise WorkspaceError("地图坐标系无效。")
+        destination = self.canvas.mapSettings().destinationCrs()
+        try:
+            transform = QgsCoordinateTransform(source, destination, self.project)
+            rectangle = transform.transformBoundingBox(QgsRectangle(*values))
+        except Exception as exc:
+            raise WorkspaceError("工作站无法转换地图视野。") from exc
+        self.canvas.setExtent(rectangle)
+        self.canvas.setRotation(angle % 360)
+        self.canvas.refresh()
+        return {}
+
+    def layout(self, data):
+        self.refresh()
+        if data.get("session") != self.session or data.get("base") != self.revision:
+            raise WorkspaceError("工作站图层树已变更，请刷新后重试。", 409)
+        layers = {key: self.project.mapLayer(key) for key in self._document["layers"]}
+        tree = data.get("tree")
+        wanted, _ = validate_tree(tree, layers)
+        settings = data.get("settings", {})
+        validate_settings(settings, wanted)
+        for key in layers.keys() - wanted:
+            layer = layers[key]
+            if isinstance(layer, QgsVectorLayer) and layer.isEditable():
+                raise WorkspaceError("请先结束图层编辑。", 409)
+        for key, value in settings.items():
+            layer = layers[key]
+            layer.setName(value["name"])
+            set_opacity(layer, value["opacity"])
+            apply_style(layer, value.get("style", ""))
+        self.project.removeMapLayers(list(layers.keys() - wanted))
+        apply_tree(self.project.layerTreeRoot(), tree, layers)
+        self.project.setDirty(True)
+        return self.state({})
+
     def state(self, data):
-        layers = [self.describe(node.layer()) for node in self.project.layerTreeRoot().findLayers() if node.layer()]
-        return {"layers": [layer for layer in layers if layer is not None]}
+        self.refresh()
+        previous = self._history.get(data.get("since")) if type(data.get("since")) is int else None
+        if data.get("session") != self.session:
+            previous = None
+        current = self._document
+        before = previous["layers"] if previous else {}
+        result = {
+            "session": self.session, "revision": self.revision, "full": previous is None,
+            "layers": [value for key, value in current["layers"].items() if before.get(key) != value],
+            "removed": list(before.keys() - current["layers"].keys()),
+            "view": self.current_view() if previous is None else None,
+            "project": current["project"],
+        }
+        if previous is None or previous["tree"] != current["tree"]:
+            result["tree"] = current["tree"]
+        return result
 
     def refresh(self):
-        rasters = {}
+        rasters, descriptors = {}, {}
         for layer in self.project.mapLayers().values():
-            if isinstance(layer, QgsRasterLayer) and self.source(layer):
-                try:
+            if self.source(layer) is None:
+                continue
+            try:
+                desc = self.describe(layer)
+                if desc and desc["kind"] == "raster":
                     rasters[layer.id()] = self.raster_spec(layer, self.source(layer)[0])
-                except OSError:
-                    continue
+                if desc:
+                    descriptors[layer.id()] = desc
+            except OSError:
+                continue
         self.rasters = rasters
-        fingerprint = (
-            tuple((key, spec["version"]) for key, spec in sorted(rasters.items())),
-            self.project.fileName(), self.project.title(),
-            tuple((node.layerId(), node.name(), node.itemVisibilityChecked())
-                  for node in self.project.layerTreeRoot().findLayers()),
-        )
-        if fingerprint != self._fingerprint:
-            self._fingerprint = fingerprint
+        tree = read_tree(self.project.layerTreeRoot(), {key: key for key in descriptors})
+        filename = Path(self.project.fileName()) if self.project.fileName() else None
+        relative = self.files.relative(filename) if filename and filename.is_relative_to(self.files.root) else ""
+        current = {"tree": tree, "layers": descriptors, "project": {
+            "title": self.project.title(), "path": relative, "crs": self.project.crs().authid(),
+        }}
+        if self._document != current:
+            self._document = current
             self.revision += 1
+            self._history[self.revision] = current
+            if len(self._history) > 16:
+                self._history.pop(next(iter(self._history)))
         return self.revision

@@ -99,6 +99,14 @@ def host_tick():
         assert len(project.mapLayers()) == 3
         assert all(str(root / "shared") in layer.source() for layer in project.mapLayers().values())
         mark("workspace-host-verified")
+    if stage == 4 and version >= 4 and not (root / "project-layout-verified").exists():
+        layers = [layer for layer in project.mapLayers().values() if layer.name() == "远程点样式"]
+        if layers and abs(panel.iface.mapCanvas().rotation() - 12) < 0.1:
+            layer = layers[0]
+            assert abs(layer.opacity() - 0.55) < 1e-6
+            assert layer.renderer().symbol().color().name() == "#a33b87"
+            assert project.layerTreeRoot().findLayer(layer.id()).parent().name() == "远程数据组"
+            mark("project-layout-verified")
     if stage == 4 and (root / "finish").exists():
         service = panel._host
         assert utils.unloadPlugin(key)
@@ -141,7 +149,8 @@ def client_tick():
         assert labels == ["—"] * 5, labels
         mark("client-retry")
         stage = 4
-    if stage == 4 and state == "connected" and labels[3] == "测试项目 · 服务重启":
+    if stage == 4 and state == "connected" and (labels[3] == "测试项目 · 服务重启"
+                                                   or version > 1 and scenario.step > 0):
         if version > 1 and not scenario.tick():
             return
         panel.disconnect_button.click()
