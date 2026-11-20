@@ -71,6 +71,10 @@ class Connection(QObject):
         return self._ready
 
     @property
+    def authorization(self) -> bytes:
+        return b"Bearer " + self._token.encode("ascii")
+
+    @property
     def origin(self) -> str:
         return self._url.toString() if self._url is not None else ""
 
@@ -92,7 +96,7 @@ class Connection(QObject):
         if websocket:
             url.setScheme("wss" if url.scheme() == "https" else "ws")
         request = QNetworkRequest(url)
-        request.setRawHeader(b"Authorization", b"Bearer " + self._token.encode("ascii"))
+        request.setRawHeader(b"Authorization", self.authorization)
         request.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.ManualRedirectPolicy)
         return request
 

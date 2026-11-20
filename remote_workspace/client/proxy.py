@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from qgis.core import (
-    QgsCoordinateReferenceSystem, QgsFeature, QgsGeometry, QgsMemoryProviderUtils, QgsProject,
-    QgsRectangle, QgsVectorLayer, QgsWkbTypes,
+    QgsCoordinateReferenceSystem, QgsFeature, QgsMemoryProviderUtils, QgsProject,
+    QgsWkbTypes,
 )
 
+from .rasters import RasterTiles
 from ..common.vector import fields_from, geometry_from, unpack
 
 
@@ -35,23 +36,12 @@ def vector_proxy(name: str, document: dict):
     return layer
 
 
-def footprint(descriptor: dict):
-    layer = QgsVectorLayer("Polygon", descriptor["name"], "memory")
-    layer.setCrs(crs_from(descriptor["wkt"], descriptor["crs"]))
-    feature = QgsFeature()
-    feature.setGeometry(QgsGeometry.fromRect(QgsRectangle(*descriptor["bounds"])))
-    layer.dataProvider().addFeatures([feature])
-    layer.updateExtents()
-    layer.setReadOnly(True)
-    layer.setCustomProperty("skipMemoryLayersCheck", 1)
-    return layer
-
-
 class Proxies:
-    def __init__(self, connection, changed, failure):
+    def __init__(self, connection, canvas, changed, failure):
         self.connection = connection
         self.changed = changed
         self.failure = failure
+        self.tiles = RasterTiles(connection, canvas)
         self.project = QgsProject.instance()
         self.layers = {}
         self.descriptors = {}
@@ -85,17 +75,25 @@ class Proxies:
                 self.refresh()
 
     def apply(self, state):
+        previous = self.descriptors
         self.descriptors = {layer["id"]: layer for layer in state["layers"]}
+        self.tiles.descriptors = [desc for desc in self.descriptors.values() if desc["kind"] == "raster"]
         for identifier, local in tuple(self.layers.items()):
             if identifier not in self.descriptors or not self.project.mapLayer(local):
                 self.layers.pop(identifier)
                 self.project.removeMapLayer(local)
         for identifier, descriptor in self.descriptors.items():
             if identifier in self.layers:
-                self.project.mapLayer(self.layers[identifier]).setName(descriptor["name"])
+                layer = self.project.mapLayer(self.layers[identifier])
+                layer.setName(descriptor["name"])
+                if descriptor.get("tile_version") and descriptor.get("tile_version") != previous.get(identifier, {}).get("tile_version"):
+                    layer.setDataSource(self.tiles.uri(descriptor), descriptor["name"], "wms")
             elif identifier not in self.pending:
                 if descriptor["kind"] == "raster":
-                    self._add(identifier, footprint(descriptor))
+                    try:
+                        self._add(identifier, self.tiles.layer(descriptor))
+                    except ValueError as exc:
+                        self.failure(str(exc))
                 else:
                     self.pending.add(identifier)
                     self.connection.call("vector", {"id": identifier},
@@ -138,4 +136,5 @@ class Proxies:
         self.group = None
         self.layers.clear()
         self.descriptors.clear()
+        self.tiles.descriptors = []
         self.pending.clear()

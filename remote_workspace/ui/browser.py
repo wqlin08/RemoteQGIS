@@ -2,15 +2,15 @@
 
 from pathlib import PurePosixPath
 
-from qgis.core import QgsMimeDataUtils
-from qgis.gui import QgsCustomDropHandler
+from qgis.core import QgsCoordinateTransform, QgsMimeDataUtils, QgsProject, QgsRectangle
+from qgis.gui import QgsCustomDropHandler, QgsMapToolEmitPoint
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..client.proxy import Proxies
+from ..client.proxy import Proxies, crs_from
 
 MIME_PROVIDER = "remoteqgis"
 
@@ -66,7 +66,7 @@ class Browser(QWidget):
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setDragEnabled(True)
         self.tree.itemDoubleClicked.connect(self._open)
-        self.proxies = Proxies(connection, self._refresh_layers, self.show_error)
+        self.proxies = Proxies(connection, iface.mapCanvas(), self._refresh_layers, self.show_error)
         self.drop_handler = RemoteDropHandler(self)
         iface.registerCustomDropHandler(self.drop_handler)
         self.entries = []
@@ -83,6 +83,15 @@ class Browser(QWidget):
                             ("重命名", self.rename), ("删除", self.delete)):
             actions.addWidget(self._button(title, slot))
         layout.addLayout(actions)
+        image = QHBoxLayout()
+        image.addWidget(self._button("影像范围", self._zoom_raster))
+        image.addWidget(self._button("波段与拉伸", self._render_raster))
+        image.addWidget(self._button("原始像元", self._query_raster))
+        layout.addLayout(image)
+        self._pixel_tool = QgsMapToolEmitPoint(iface.mapCanvas())
+        self._pixel_tool.canvasClicked.connect(self._pixel_clicked)
+        self._pixel_target = None
+        self._previous_tool = None
         self.layers_status = QLabel()
         layout.addWidget(self.layers_status)
         layout.addWidget(self.message)
@@ -202,6 +211,105 @@ class Browser(QWidget):
         self.connection.call(operation, data, lambda _, error: self.show_error(error) if error
                              else self.browse(self.directory))
 
+    def active_descriptor(self, kind):
+        layer = self.iface.activeLayer()
+        identifier = layer.customProperty("remoteqgis/id") if layer is not None else None
+        descriptor = self.proxies.descriptors.get(identifier)
+        if descriptor and descriptor["kind"] == kind:
+            return descriptor
+        self.show_error("请在 QGIS 图层面板中选择对应的远端图层。")
+        return None
+
+    def _raster_transform(self, descriptor):
+        canvas = self.iface.mapCanvas()
+        return QgsCoordinateTransform(crs_from(descriptor["wkt"], descriptor["crs"]),
+                                      canvas.mapSettings().destinationCrs(), QgsProject.instance())
+
+    def _zoom_raster(self):
+        descriptor = self.active_descriptor("raster")
+        if descriptor:
+            try:
+                rect = self._raster_transform(descriptor).transformBoundingBox(QgsRectangle(*descriptor["bounds"]))
+                self.iface.mapCanvas().setExtent(rect)
+                self.iface.mapCanvas().refresh()
+            except Exception:
+                self.show_error("无法将影像范围转换到当前地图坐标系。")
+
+    def _render_raster(self):
+        descriptor = self.active_descriptor("raster")
+        if not descriptor:
+            return
+        render = descriptor["render"]
+        text, ok = QInputDialog.getText(
+            self, "远端影像渲染", "波段（1 或 3 个，逗号分隔）",
+            text=",".join(map(str, render["bands"])),
+        )
+        if not ok:
+            return
+        stretch, ok = QInputDialog.getText(
+            self, "远端影像渲染", "每个波段的下限:上限，以逗号分隔。留空自动拉伸。",
+            text=",".join(f"{lo}:{hi}" for lo, hi in render["stretch"]),
+        )
+        if not ok:
+            return
+        resampling = ["near", "bilinear", "cubic", "average"]
+        algorithm, ok = QInputDialog.getItem(self, "远端影像渲染", "重采样", resampling,
+                                             resampling.index(render["resample"]), False)
+        if not ok:
+            return
+        nodata, ok = QInputDialog.getText(
+            self, "远端影像渲染", "NoData（留空使用源数据定义）",
+            text="" if render["nodata"] is None else str(render["nodata"]),
+        )
+        if not ok:
+            return
+        try:
+            config = {
+                "id": descriptor["id"], "bands": [int(band) for band in text.split(",")],
+                "stretch": [[float(value) for value in pair.split(":")]
+                            for pair in stretch.split(",")] if stretch.strip() else [],
+                "nodata": float(nodata) if nodata.strip() else None, "resample": algorithm,
+            }
+            self.connection.call("render", config, lambda _, error: self.show_error(error)
+                                 if error else self.proxies.refresh())
+        except ValueError:
+            self.show_error("波段、拉伸区间或 NoData 的格式无效。")
+
+    def _query_raster(self):
+        self._pixel_target = self.active_descriptor("raster")
+        if self._pixel_target:
+            canvas = self.iface.mapCanvas()
+            if canvas.mapTool() is not self._pixel_tool:
+                self._previous_tool = canvas.mapTool()
+            canvas.setMapTool(self._pixel_tool)
+            self.show_error("请在地图中单击要查询的像元。")
+
+    def _restore_tool(self):
+        canvas = self.iface.mapCanvas()
+        if canvas.mapTool() is self._pixel_tool:
+            if self._previous_tool:
+                canvas.setMapTool(self._previous_tool)
+            else:
+                canvas.unsetMapTool(self._pixel_tool)
+
+    def _pixel_clicked(self, point, _button):
+        self._restore_tool()
+        descriptor, self._pixel_target = self._pixel_target, None
+        if not descriptor:
+            return
+        try:
+            point = self._raster_transform(descriptor).transform(point, QgsCoordinateTransform.ReverseTransform)
+        except Exception:
+            self.show_error("无法转换像元查询坐标。")
+            return
+        self.connection.call("pixel", {"id": descriptor["id"], "x": point.x(), "y": point.y()},
+                             self._pixel_result)
+
+    def _pixel_result(self, data, error):
+        self.show_error(error or f"原始像元（行 {data['row']}，列 {data['column']}） {data['values']}")
+
     def shutdown(self):
+        self._restore_tool()
+        self.proxies.tiles.close()
         self.iface.unregisterCustomDropHandler(self.drop_handler)
         self.proxies.clear()

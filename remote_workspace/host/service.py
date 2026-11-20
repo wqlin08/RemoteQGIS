@@ -23,7 +23,7 @@ class HostService:
     def __init__(self, config: HostConfig, info: HostInfo, dispatcher):
         self.config = config
         self.dispatcher = dispatcher
-        self._info = (info, 0)
+        self._info = (info, 0, {})
         self._lock = threading.Lock()
         self._status = ServiceStatus("starting")
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -37,8 +37,8 @@ class HostService:
         with self._lock:
             return self._status
 
-    def publish(self, info: HostInfo, revision: int):
-        state = (info, revision)
+    def publish(self, info: HostInfo, revision: int, rasters: dict):
+        state = (info, revision, rasters)
         with self._lock:
             if state == self._info:
                 return

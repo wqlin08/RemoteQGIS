@@ -9,7 +9,8 @@ from tornado.web import Application, HTTPError, RequestHandler
 from tornado.websocket import WebSocketClosedError, WebSocketHandler
 
 from ..common.protocol import EVENTS_PATH, INFO_PATH, MAX_MESSAGE_BYTES, authorized
-from ..common.workspace import API, MAX_DOCUMENT, WorkspaceError
+from ..common.workspace import API, MAX_DOCUMENT, TILES, WorkspaceError
+from .rasters import MAX_ZOOM, render, sample
 
 
 class Authenticated:
@@ -72,11 +73,38 @@ class WorkspaceHandler(Authenticated, RequestHandler):
         self.finish(encoded)
 
 
+class TileHandler(Authenticated, RequestHandler):
+    def on_connection_close(self):
+        job = getattr(self, "_job", None)
+        if job is not None:
+            job.cancel()
+
+    async def get(self, identifier, version, zoom, x, y):
+        spec = self.api.state[2].get(identifier)
+        z, x, y = int(zoom), int(x), int(y)
+        if not spec or version != spec["version"] or z > MAX_ZOOM or x >= 1 << z or y >= 1 << z:
+            raise HTTPError(404, reason="影像瓦片或版本不存在。")
+        try:
+            self._job = asyncio.create_task(self.api.tile_job(
+                render, spec["path"], spec["stamp"], spec["bands"], spec["stretch"],
+                spec["resample"], spec["nodata"], z, x, y,
+            ))
+            image = await self._job
+        except asyncio.CancelledError:
+            return
+        except (WorkspaceError, RuntimeError, OSError):
+            raise HTTPError(422, reason="影像瓦片读取失败。")
+        self.set_header("Content-Type", "image/png")
+        self.set_header("Cache-Control", "private, max-age=31536000")
+        self.finish(image)
+
+
 class HostAPI:
     def __init__(self, token: str, state: tuple, dispatcher):
         self.token = token
         self.state = state
         self.dispatcher = dispatcher
+        self._raster_workers = asyncio.Semaphore(4)
         self.clients: Set[EventsHandler] = set()
         self._sending = set()
         self.application = Application(
@@ -84,6 +112,8 @@ class HostAPI:
                 (INFO_PATH, InfoHandler, {"api": self}),
                 (EVENTS_PATH, EventsHandler, {"api": self}),
                 (API, WorkspaceHandler, {"api": self}),
+                (TILES + r"/([A-Za-z0-9_]+)/([0-9a-f]{24})/(\d{1,2})/(\d{1,8})/(\d{1,8})\.png",
+                 TileHandler, {"api": self}),
             ],
             websocket_ping_interval=15,
             websocket_ping_timeout=10,
@@ -94,7 +124,17 @@ class HostAPI:
     def event(self):
         return dict(self.state[0].message(event=True), revision=self.state[1])
 
+    async def tile_job(self, function, *args):
+        async with self._raster_workers:
+            return await asyncio.to_thread(function, *args)
+
     async def call(self, operation: str, arguments: dict):
+        if operation == "pixel":
+            key = arguments.get("id")
+            spec = self.state[2].get(key) if isinstance(key, str) else None
+            if spec is None:
+                raise WorkspaceError("影像不存在。", 404)
+            return await self.tile_job(sample, spec, arguments.get("x"), arguments.get("y"))
         future = self.dispatcher.submit(operation, arguments)
         return await asyncio.wait_for(asyncio.wrap_future(future), 40)
 

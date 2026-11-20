@@ -151,6 +151,7 @@ class WorkspacePanel(QDockWidget):
             self._last_info = host_info()
             self._workspace = HostWorkspace(config.shared_directory, self.iface.mapCanvas())
             self._dispatcher = Dispatcher(self._workspace, self)
+            self._dispatcher.changed.connect(self._publish_snapshot)
             self._host = HostService(config, self._last_info, self._dispatcher)
         except (ValueError, RuntimeError) as exc:
             self._show_host_status("error", str(exc))
@@ -179,8 +180,12 @@ class WorkspacePanel(QDockWidget):
                 details["running"] = f"正在监听 {config.address}，端口 {config.port}。"
             self._show_host_status(status.state, status.detail or details.get(status.state, ""))
         if status.state == "running":
-            snapshot = host_info()
-            self._host.publish(snapshot, self._workspace.refresh())
+            self._publish_snapshot()
+
+    def _publish_snapshot(self):
+        snapshot = host_info()
+        revision = self._workspace.refresh()
+        self._host.publish(snapshot, revision, self._workspace.rasters)
 
     def _connect(self):
         if self._connection.active or self._host is not None:

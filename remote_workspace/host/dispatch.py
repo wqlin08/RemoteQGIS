@@ -8,6 +8,7 @@ from ..common.workspace import WorkspaceError
 
 
 class Dispatcher(QObject):
+    changed = pyqtSignal()
     requested = pyqtSignal(object, str, object)
 
     def __init__(self, workspace, parent=None):
@@ -28,6 +29,9 @@ class Dispatcher(QObject):
         try:
             if not self.active:
                 raise WorkspaceError("工作站服务已停止。", 503)
-            result.set_result(self.workspace.execute(operation, data))
+            value = self.workspace.execute(operation, data)
+            if operation not in ("state", "files", "vector", "view"):
+                self.changed.emit()
+            result.set_result(value)
         except Exception as exc:
             result.set_exception(exc)

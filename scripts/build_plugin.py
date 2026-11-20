@@ -27,10 +27,15 @@ def package_files():
     for name in ("LICENSE", "README.md", "CHANGELOG.md"):
         yield f"remote_workspace/{name}", (ROOT / name).read_bytes()
 
-    with urlopen(TORNADO_URL, timeout=30) as response:
-        dependency = response.read()
+    cache = ROOT / "build" / "tornado-6.5.10.tar.gz"
+    dependency = cache.read_bytes() if cache.exists() else b""
+    if sha256(dependency).hexdigest() != TORNADO_SHA256:
+        with urlopen(TORNADO_URL, timeout=30) as response:
+            dependency = response.read()
     if sha256(dependency).hexdigest() != TORNADO_SHA256:
         raise RuntimeError("Tornado source archive hash does not match the pinned release.")
+    cache.parent.mkdir(exist_ok=True)
+    cache.write_bytes(dependency)
     with tarfile.open(fileobj=BytesIO(dependency), mode="r:gz") as archive:
         for member in sorted(archive.getmembers(), key=lambda entry: entry.name):
             path = PurePosixPath(*PurePosixPath(member.name).parts[1:])

@@ -4,7 +4,7 @@
 
 from osgeo import gdal, ogr, osr
 
-from qgis.core import QgsMimeDataUtils, QgsVectorLayer
+from qgis.core import QgsMimeDataUtils, QgsRasterLayer, QgsRectangle, QgsVectorLayer
 from qgis.PyQt.QtCore import Qt
 
 
@@ -79,9 +79,40 @@ class Scenario:
             assert count == 2
             self.mark("workspace-imported")
             self.step = 4
-        return self.step == 4 and (self.root / "workspace-host-verified").exists()
+        if self.step == 4 and (self.root / "workspace-host-verified").exists():
+            if self.version < 3:
+                return True
+            raster, = [desc for desc in proxies.descriptors.values() if desc["kind"] == "raster"]
+            self.raster_id = raster["id"]
+            self.tile_version = raster["tile_version"]
+            self.connection.call("pixel", {"id": self.raster_id, "x": 0.2, "y": 0.2}, self._pixel)
+            self.step = 5
+        if self.step == 6:
+            raster = proxies.descriptors[self.raster_id]
+            if raster["tile_version"] == self.tile_version:
+                return False
+            layer = proxies.project.mapLayer(proxies.layers[self.raster_id])
+            assert isinstance(layer, QgsRasterLayer) and layer.isValid(), layer
+            # Native provider work exercises its network preprocessor and PNG decode.
+            block = layer.dataProvider().block(1, QgsRectangle(24000, 24000, 50000, 50000), 16, 16)
+            assert block.isValid() and not block.isEmpty()
+            color = block.color(8, 8)
+            assert (color >> 24) == 255 and 120 <= (color & 255) <= 135, hex(color)
+            self.mark("raster-verified")
+            self.step = 7
+        return self.step == 7
 
     def _path_test(self, result, error):
         assert error and result is None
         self.browser.browse("测试数据")
         self.step = 2
+
+    def _pixel(self, data, error):
+        assert not error and data["values"] == [1000, 2000, 3000], (data, error)
+        self.connection.call("render", {"id": self.raster_id, "bands": [2],
+                                        "stretch": [[0, 4000]], "resample": "near"}, self._rendered)
+
+    def _rendered(self, data, error):
+        assert not error, error
+        self.browser.proxies.refresh()
+        self.step = 6

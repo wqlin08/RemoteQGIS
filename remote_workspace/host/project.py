@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from pathlib import Path
+from hashlib import sha256
+import json
+import math
 
 from qgis.core import (
-    QgsProject, QgsRasterLayer, QgsVectorLayer,
+    QgsProject, QgsRasterLayer, QgsVectorLayer, QgsMultiBandColorRenderer,
+    QgsSingleBandGrayRenderer, QgsContrastEnhancement,
     QgsProviderRegistry, QgsWkbTypes,
 )
 
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 from .files import SharedFiles
 from .vectors import snapshot
+from .rasters import RESAMPLING, file_stamp
 
 
 def bounds(rectangle):
@@ -23,11 +28,12 @@ class HostWorkspace:
         self.canvas = canvas
         self.revision = 0
         self._fingerprint = None
+        self.rasters = {}
 
     def execute(self, operation: str, data: dict):
         operations = {
             "files": self.list_files, "import": self.import_files, "state": self.state,
-            "vector": self.vector, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
+            "vector": self.vector, "render": self.render, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
         }
         handler = operations.get(operation)
         if handler is None:
@@ -137,7 +143,7 @@ class HostWorkspace:
         path, table = source
         raster = isinstance(layer, QgsRasterLayer)
         node = self.project.layerTreeRoot().findLayer(layer.id())
-        return {
+        metadata = {
             "id": layer.id(), "name": layer.name(), "kind": "raster" if raster else "vector",
             "path": self.files.relative(path), "table": table or "", "crs": layer.crs().authid(),
             "wkt": layer.crs().toWkt(), "bounds": bounds(layer.extent()),
@@ -147,12 +153,95 @@ class HostWorkspace:
             "fields": [] if raster else [field.name() for field in layer.fields()],
         }
 
+        if raster:
+            spec = self.raster_spec(layer, path)
+            metadata.update(tile_version=spec["version"], render={key: spec[key] for key in
+                            ("bands", "stretch", "resample", "nodata")})
+        return metadata
+
+    def raster_spec(self, layer, path):
+        renderer = layer.renderer()
+        bands = [1, 2, 3] if layer.bandCount() >= 3 else [1]
+        stretch = []
+        if isinstance(renderer, QgsMultiBandColorRenderer):
+            chosen = [renderer.redBand(), renderer.greenBand(), renderer.blueBand()]
+            if all(band > 0 for band in chosen):
+                bands = chosen
+                stretch = [renderer.redContrastEnhancement(), renderer.greenContrastEnhancement(),
+                           renderer.blueContrastEnhancement()]
+        elif isinstance(renderer, QgsSingleBandGrayRenderer):
+            bands = [renderer.grayBand()]
+            stretch = [renderer.contrastEnhancement()]
+        stretch = [(item.minimumValue(), item.maximumValue()) for item in stretch] if all(stretch) else []
+        if any(not math.isfinite(lo) or not math.isfinite(hi) or lo >= hi for lo, hi in stretch):
+            stretch = []
+        spec = {
+            "path": str(path), "stamp": file_stamp(path), "bands": tuple(bands), "stretch": tuple(stretch),
+            "resample": layer.customProperty("remoteqgis/resample", "bilinear"),
+            "nodata": layer.customProperty("remoteqgis/nodata", None),
+        }
+        spec["version"] = sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:24]
+        return spec
+
+    def render(self, data):
+        layer = self.layer(data, QgsRasterLayer)
+        bands = data.get("bands")
+        stretch = data.get("stretch", [])
+        resample = data.get("resample", "bilinear")
+        nodata = data.get("nodata")
+        if not isinstance(bands, list) or len(bands) not in (1, 3) or any(
+            type(band) is not int or not 1 <= band <= layer.bandCount() for band in bands
+        ):
+            raise WorkspaceError("请选择一个灰度波段或三个 RGB 波段。")
+        if not isinstance(stretch, list) or stretch and (
+            len(stretch) != len(bands) or any(
+                not isinstance(pair, list) or len(pair) != 2
+                or any(type(value) not in (int, float) or not math.isfinite(value) for value in pair)
+                or pair[0] >= pair[1] for pair in stretch
+            )
+        ):
+            raise WorkspaceError("每个波段的拉伸下限须小于上限。")
+        if resample not in RESAMPLING or nodata is not None and (
+            type(nodata) not in (int, float) or not math.isfinite(nodata)
+        ):
+            raise WorkspaceError("重采样方式或 NoData 值无效。")
+        provider = layer.dataProvider()
+        renderer = (QgsSingleBandGrayRenderer(provider, bands[0]) if len(bands) == 1
+                    else QgsMultiBandColorRenderer(provider, *bands))
+        setters = ([renderer.setContrastEnhancement] if len(bands) == 1 else [
+            renderer.setRedContrastEnhancement, renderer.setGreenContrastEnhancement,
+            renderer.setBlueContrastEnhancement,
+        ])
+        for band, pair, setter in zip(bands, stretch, setters):
+            enhance = QgsContrastEnhancement(provider.dataType(band))
+            enhance.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum)
+            enhance.setMinimumValue(pair[0])
+            enhance.setMaximumValue(pair[1])
+            setter(enhance)
+        layer.setRenderer(renderer)
+        layer.setCustomProperty("remoteqgis/resample", resample)
+        if nodata is None:
+            layer.removeCustomProperty("remoteqgis/nodata")
+        else:
+            layer.setCustomProperty("remoteqgis/nodata", nodata)
+        layer.triggerRepaint()
+        return {}
+
     def state(self, data):
         layers = [self.describe(node.layer()) for node in self.project.layerTreeRoot().findLayers() if node.layer()]
         return {"layers": [layer for layer in layers if layer is not None]}
 
     def refresh(self):
+        rasters = {}
+        for layer in self.project.mapLayers().values():
+            if isinstance(layer, QgsRasterLayer) and self.source(layer):
+                try:
+                    rasters[layer.id()] = self.raster_spec(layer, self.source(layer)[0])
+                except OSError:
+                    continue
+        self.rasters = rasters
         fingerprint = (
+            tuple((key, spec["version"]) for key, spec in sorted(rasters.items())),
             self.project.fileName(), self.project.title(),
             tuple((node.layerId(), node.name(), node.itemVisibilityChecked())
                   for node in self.project.layerTreeRoot().findLayers()),
