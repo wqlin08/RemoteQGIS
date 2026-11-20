@@ -19,7 +19,7 @@ class RemoteWorkspacePlugin:
 
     def _show_workspace(self):
         if self._panel is None:
-            self._panel = WorkspacePanel(self.iface.mainWindow())
+            self._panel = WorkspacePanel(self.iface)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._panel)
         self._panel.show()
         self._panel.raise_()

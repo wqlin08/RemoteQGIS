@@ -7,6 +7,7 @@ import threading
 from typing import Optional
 
 from ..common.protocol import HostInfo
+from ..common.workspace import MAX_DOCUMENT
 from .config import HostConfig
 
 
@@ -19,9 +20,10 @@ class ServiceStatus:
 class HostService:
     """Own the network loop. The QGIS thread publishes immutable snapshots."""
 
-    def __init__(self, config: HostConfig, info: HostInfo):
+    def __init__(self, config: HostConfig, info: HostInfo, dispatcher):
         self.config = config
-        self._info = info
+        self.dispatcher = dispatcher
+        self._info = (info, 0)
         self._lock = threading.Lock()
         self._status = ServiceStatus("starting")
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -35,13 +37,14 @@ class HostService:
         with self._lock:
             return self._status
 
-    def publish(self, info: HostInfo):
+    def publish(self, info: HostInfo, revision: int):
+        state = (info, revision)
         with self._lock:
-            if info == self._info:
+            if state == self._info:
                 return
-            self._info = info
+            self._info = state
             if self._status.state == "running":
-                self._loop.call_soon_threadsafe(self._publish, info)
+                self._loop.call_soon_threadsafe(self._publish, state)
 
     def stop(self):
         with self._lock:
@@ -72,14 +75,14 @@ class HostService:
         with self._lock:
             if self._status.state == "stopping":
                 return
-            api = HostAPI(self.config.token, self._info)
+            api = HostAPI(self.config.token, self._info, self.dispatcher)
             self._loop = asyncio.get_running_loop()
             self._stop_signal = asyncio.Event()
             self._publish = api.publish
 
         server = HTTPServer(
-            api.application, max_header_size=8192, max_body_size=4096,
-            body_timeout=5, idle_connection_timeout=15, decompress_request=False,
+            api.application, max_header_size=8192, max_body_size=MAX_DOCUMENT,
+            body_timeout=45, idle_connection_timeout=15, decompress_request=False,
         )
         try:
             server.listen(self.config.port, address=self.config.address)

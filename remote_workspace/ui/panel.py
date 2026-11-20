@@ -10,9 +10,12 @@ from qgis.PyQt.QtWidgets import (
 from ..client.connection import Connection, endpoint
 from ..common.protocol import HostInfo, new_token
 from ..host.config import HostConfig
+from ..host.dispatch import Dispatcher
+from ..host.project import HostWorkspace
 from ..host.dependencies import load_tornado
 from ..host.qgis_info import environment, host_info, validate_environment
 from ..host.service import HostService
+from .browser import Browser
 
 
 def plain_label(text: str = "") -> QLabel:
@@ -31,8 +34,10 @@ def port_field() -> QSpinBox:
 
 
 class WorkspacePanel(QDockWidget):
-    def __init__(self, parent=None):
-        super().__init__("RemoteQGIS", parent)
+    def __init__(self, iface):
+        super().__init__("RemoteQGIS", iface.mainWindow())
+        self.iface = iface
+        self._dispatcher = None
         self.setObjectName("RemoteQGISWorkspace")
         self._host = None
         self._host_state = "stopped"
@@ -50,6 +55,8 @@ class WorkspacePanel(QDockWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._host_tab(), "Host · 工作站")
         self.tabs.addTab(self._client_tab(), "Client · 客户端")
+        self.browser = Browser(self._connection, iface)
+        self.tabs.addTab(self.browser, "远程工作区")
         layout.addWidget(self.tabs)
         layout.addWidget(plain_label(environment()))
         self.setWidget(widget)
@@ -142,7 +149,9 @@ class WorkspacePanel(QDockWidget):
             )
             load_tornado()
             self._last_info = host_info()
-            self._host = HostService(config, self._last_info)
+            self._workspace = HostWorkspace(config.shared_directory, self.iface.mapCanvas())
+            self._dispatcher = Dispatcher(self._workspace, self)
+            self._host = HostService(config, self._last_info, self._dispatcher)
         except (ValueError, RuntimeError) as exc:
             self._show_host_status("error", str(exc))
             return
@@ -151,6 +160,7 @@ class WorkspacePanel(QDockWidget):
 
     def _stop_host(self):
         if self._host is not None:
+            self._dispatcher.active = False
             self._host.stop()
             self._poll_host()
 
@@ -159,6 +169,9 @@ class WorkspacePanel(QDockWidget):
         if status.state in ("stopped", "error"):
             self._host_timer.stop()
             self._host = None
+            self._dispatcher.active = False
+            self._dispatcher.deleteLater()
+            self._dispatcher = None
         if status.state != self._host_state:
             details = {"stopping": "正在停止服务…", "stopped": "服务已停止。"}
             if status.state == "running":
@@ -167,9 +180,7 @@ class WorkspacePanel(QDockWidget):
             self._show_host_status(status.state, status.detail or details.get(status.state, ""))
         if status.state == "running":
             snapshot = host_info()
-            if snapshot != self._last_info:
-                self._last_info = snapshot
-                self._host.publish(snapshot)
+            self._host.publish(snapshot, self._workspace.refresh())
 
     def _connect(self):
         if self._connection.active or self._host is not None:
@@ -227,7 +238,9 @@ class WorkspacePanel(QDockWidget):
     def shutdown(self):
         self._host_timer.stop()
         if self._host is not None:
+            self._dispatcher.active = False
             self._host.stop()
+        self.browser.shutdown()
         self._connection.stop()
         self.host_token.clear()
         self.remote_token.clear()

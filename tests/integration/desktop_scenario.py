@@ -2,23 +2,31 @@
 
 """Runs inside QGIS Desktop through the --code option."""
 
+import faulthandler
 import json
 import os
 from pathlib import Path
 import secrets
 import traceback
+import sys
 
 from pyplugin_installer import instance as plugin_installer
 from qgis import utils
 from qgis.core import Qgis, QgsProject
 from qgis.PyQt.QtCore import QTimer
 
+faulthandler.enable()
 root = Path(os.environ["REMOTEQGIS_TEST_ROOT"])
 role = os.environ["REMOTEQGIS_TEST_ROLE"]
 settings = json.loads((root / "settings.json").read_text(encoding="utf-8"))
 port, timeout_port, token = settings["port"], settings["timeout_port"], settings["token"]
 project = QgsProject.instance()
 key = "remote_workspace"
+version = settings.get("version", 1)
+if version > 1:
+    sys.path.insert(0, os.environ["REMOTEQGIS_TEST_SCRIPTS"])
+    from workspace_scenario import Scenario, fixtures
+
 stage = -1
 timer = QTimer()
 
@@ -38,7 +46,7 @@ def guarded(action):
 
 
 def setup():
-    global panel
+    global panel, scenario
     plugin_installer().installFromZipFile(os.environ["REMOTEQGIS_TEST_ZIP"])
     assert utils.isPluginLoaded(key), "QGIS could not install and start the ZIP"
     plugin = utils.plugins[key]
@@ -46,12 +54,16 @@ def setup():
     panel = plugin._panel
     assert panel.isVisible() and "QGIS 3." in panel.widget().layout().itemAt(1).widget().text()
     if role == "host":
+        if version > 1:
+            fixtures(root, version)
         project.setTitle("测试项目 · 初始")
         panel.bind_port.setValue(timeout_port)
         panel.directory.setText(str(root / "shared"))
         panel.host_token.setText(token)
         panel.start_host.click()
     else:
+        if version > 1:
+            scenario = Scenario(panel, version, mark, root)
         panel.tabs.setCurrentIndex(1)
         panel.remote_port.setValue(timeout_port)
         panel.remote_token.setText(token)
@@ -83,6 +95,10 @@ def host_tick():
         project.setFileName(str(root / "测试项目 · 服务重启.qgz"))
         panel.start_host.click()
         stage = 4
+    if stage == 4 and (root / "workspace-imported").exists() and not (root / "workspace-host-verified").exists():
+        assert len(project.mapLayers()) == 3
+        assert all(str(root / "shared") in layer.source() for layer in project.mapLayers().values())
+        mark("workspace-host-verified")
     if stage == 4 and (root / "finish").exists():
         service = panel._host
         assert utils.unloadPlugin(key)
@@ -126,6 +142,8 @@ def client_tick():
         mark("client-retry")
         stage = 4
     if stage == 4 and state == "connected" and labels[3] == "测试项目 · 服务重启":
+        if version > 1 and not scenario.tick():
+            return
         panel.disconnect_button.click()
         assert panel._client_state == "idle" and not panel._connection.active
         assert utils.unloadPlugin(key)

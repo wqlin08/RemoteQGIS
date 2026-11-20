@@ -2,12 +2,14 @@
 
 import asyncio
 from contextlib import suppress
+import json
 from typing import Set
 
 from tornado.web import Application, HTTPError, RequestHandler
 from tornado.websocket import WebSocketClosedError, WebSocketHandler
 
-from ..common.protocol import EVENTS_PATH, INFO_PATH, MAX_MESSAGE_BYTES, HostInfo, authorized
+from ..common.protocol import EVENTS_PATH, INFO_PATH, MAX_MESSAGE_BYTES, authorized
+from ..common.workspace import API, MAX_DOCUMENT, WorkspaceError
 
 
 class Authenticated:
@@ -30,7 +32,7 @@ class Authenticated:
 class InfoHandler(Authenticated, RequestHandler):
     def get(self):
         self.set_header("Cache-Control", "no-store")
-        self.finish(self.api.info.message())
+        self.finish(self.api.state[0].message())
 
 
 class EventsHandler(Authenticated, WebSocketHandler):
@@ -38,7 +40,7 @@ class EventsHandler(Authenticated, WebSocketHandler):
         self.set_nodelay(True)
         self.api.clients.add(self)
         with suppress(WebSocketClosedError):
-            await self.write_message(self.api.info.message(event=True))
+            await self.write_message(self.api.event())
 
     def on_message(self, message):
         self.close(1008, "Read-only event stream")
@@ -47,16 +49,41 @@ class EventsHandler(Authenticated, WebSocketHandler):
         self.api.clients.discard(self)
 
 
+class WorkspaceHandler(Authenticated, RequestHandler):
+    async def post(self):
+        try:
+            body = json.loads(self.request.body)
+            operation, arguments = body["operation"], body["data"]
+            if not isinstance(operation, str) or not isinstance(arguments, dict):
+                raise ValueError
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise HTTPError(400, reason="请求结构无效。")
+        try:
+            result = await self.api.call(operation, arguments)
+            encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except WorkspaceError as exc:
+            raise HTTPError(exc.status, reason=str(exc))
+        except asyncio.TimeoutError:
+            raise HTTPError(504, reason="工作站未及时响应。")
+        if len(encoded) > MAX_DOCUMENT:
+            raise HTTPError(413, reason="结果超过传输大小限制。")
+        self.set_header("Content-Type", "application/json; charset=UTF-8")
+        self.set_header("Cache-Control", "no-store")
+        self.finish(encoded)
+
+
 class HostAPI:
-    def __init__(self, token: str, info: HostInfo):
+    def __init__(self, token: str, state: tuple, dispatcher):
         self.token = token
-        self.info = info
+        self.state = state
+        self.dispatcher = dispatcher
         self.clients: Set[EventsHandler] = set()
         self._sending = set()
         self.application = Application(
             [
                 (INFO_PATH, InfoHandler, {"api": self}),
                 (EVENTS_PATH, EventsHandler, {"api": self}),
+                (API, WorkspaceHandler, {"api": self}),
             ],
             websocket_ping_interval=15,
             websocket_ping_timeout=10,
@@ -64,9 +91,16 @@ class HostAPI:
             log_function=lambda _: None,
         )
 
-    def publish(self, info: HostInfo):
-        if info != self.info:
-            self.info = info
+    def event(self):
+        return dict(self.state[0].message(event=True), revision=self.state[1])
+
+    async def call(self, operation: str, arguments: dict):
+        future = self.dispatcher.submit(operation, arguments)
+        return await asyncio.wait_for(asyncio.wrap_future(future), 40)
+
+    def publish(self, state: tuple):
+        if state != self.state:
+            self.state = state
             for client in tuple(self.clients):
                 if client in self._sending:
                     continue
@@ -76,10 +110,10 @@ class HostAPI:
     async def _send_latest(self, client: EventsHandler):
         try:
             while client in self.clients:
-                info = self.info
+                state = self.state
                 with suppress(WebSocketClosedError):
-                    await asyncio.wait_for(client.write_message(info.message(event=True)), 5)
-                if info == self.info:
+                    await asyncio.wait_for(client.write_message(self.event()), 5)
+                if state == self.state:
                     return
         except asyncio.TimeoutError:
             client.close(1013, "Slow receiver")

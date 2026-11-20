@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import json
 from typing import Optional
 
 from qgis.PyQt.QtCore import QObject, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtNetwork import QNetworkAccessManager, QNetworkProxy, QNetworkRequest
 
+from ..common.workspace import API, MAX_DOCUMENT
 from ..common.protocol import (
     EVENTS_PATH, INFO_PATH, MAX_MESSAGE_BYTES, ProtocolError, decode_host_info, validate_token,
 )
@@ -37,6 +39,7 @@ def endpoint(host: str, port: int, https: bool) -> QUrl:
 class Connection(QObject):
     status_changed = pyqtSignal(str, str)
     info_changed = pyqtSignal(object)
+    workspace_changed = pyqtSignal(int)
     latency_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
@@ -52,6 +55,7 @@ class Connection(QObject):
         self._heartbeat.timeout.connect(self._ping)
         self._url: Optional[QUrl] = None
         self._token = ""
+        self._requests = {}
         self._reply = None
         self._socket = None
         self._awaiting_pong = False
@@ -61,6 +65,14 @@ class Connection(QObject):
     @property
     def active(self) -> bool:
         return self._url is not None
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def origin(self) -> str:
+        return self._url.toString() if self._url is not None else ""
 
     def start(self, url: QUrl, token: str):
         token = validate_token(token)
@@ -83,6 +95,54 @@ class Connection(QObject):
         request.setRawHeader(b"Authorization", b"Bearer " + self._token.encode("ascii"))
         request.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.ManualRedirectPolicy)
         return request
+
+    def call(self, operation: str, arguments: dict, callback):
+        if not self._ready:
+            callback(None, "工作站未连接。")
+            return
+        body = json.dumps({"operation": operation, "data": arguments}, ensure_ascii=False,
+                          allow_nan=False).encode("utf-8")
+        if len(body) > MAX_DOCUMENT:
+            callback(None, "请求超过传输大小限制。")
+            return
+        request = self._request(API)
+        request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
+        request.setRawHeader(b"Accept", b"application/json")
+        reply = self._network.post(request, body)
+        reply.setReadBufferSize(MAX_DOCUMENT + 1)
+        timer = QTimer(reply, singleShot=True, interval=45000)
+        self._requests[reply] = (timer, callback)
+        timer.timeout.connect(self._abort_rpc)
+        reply.readyRead.connect(self._check_rpc_size)
+        reply.finished.connect(self._finish_rpc)
+        timer.start()
+
+    def _abort_rpc(self):
+        self.sender().parent().abort()
+
+    def _check_rpc_size(self):
+        reply = self.sender()
+        if reply.bytesAvailable() > MAX_DOCUMENT:
+            reply.abort()
+
+    def _finish_rpc(self):
+        reply = self.sender()
+        timer, callback = self._requests.pop(reply)
+        timer.stop()
+        reply.readyRead.disconnect(self._check_rpc_size)
+        error = ""
+        document = None
+        try:
+            document = json.loads(bytes(reply.readAll()))
+            if not isinstance(document, dict):
+                raise ValueError
+            status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+            if status != 200:
+                error = document.get("error") or f"工作站返回 HTTP {status}。"
+        except (UnicodeError, ValueError, RecursionError):
+            error = reply.errorString() if reply.error() else "工作站返回了无效的响应。"
+        reply.deleteLater()
+        callback(None if error else document, error)
 
     def _probe(self):
         self.status_changed.emit("connecting", "正在验证 HTTP 连接…")
@@ -152,6 +212,9 @@ class Connection(QObject):
             self._heartbeat.start()
             self._ping()
         self.info_changed.emit(info)
+        revision = json.loads(message).get("revision")
+        if type(revision) is int and revision >= 0:
+            self.workspace_changed.emit(revision)
 
     def _ping(self):
         if self._awaiting_pong:

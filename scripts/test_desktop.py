@@ -37,7 +37,7 @@ def wait_for(root: Path, marker: str, processes: dict, timeout: float):
             return
         for role, process in processes.items():
             if (root / f"{role}-error").exists() or process.poll() is not None:
-                raise RuntimeError(f"QGIS {role} exited before producing {marker}.")
+                raise RuntimeError(f"QGIS {role} exited before producing {marker} (exit {process.poll()}).")
         sleep(0.05)
     raise TimeoutError(f"Timed out waiting for {marker}.")
 
@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--qgis", type=Path, required=True)
     parser.add_argument("--zip", type=Path, required=True)
     parser.add_argument("--offscreen", action="store_true", help="Use Qt's optional offscreen backend.")
+    parser.add_argument("--stage", type=int, choices=range(1, 6), default=1)
     args = parser.parse_args()
 
     with TemporaryDirectory(prefix="remoteqgis-") as directory, ExitStack() as stack:
@@ -70,7 +71,7 @@ def main():
             port_socket.bind(("127.0.0.1", 0))
             port = port_socket.getsockname()[1]
         token = secrets.token_urlsafe(32)
-        settings = {"port": port, "timeout_port": timeout_port, "token": token}
+        settings = {"port": port, "timeout_port": timeout_port, "token": token, "version": args.stage}
         (root / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
         (root / "shared").mkdir()
         with ZipFile(args.zip) as archive:
@@ -82,6 +83,7 @@ def main():
             env = dict(
                 os.environ, REMOTEQGIS_TEST_ROOT=str(root), REMOTEQGIS_TEST_ROLE=role,
                 REMOTEQGIS_TEST_ZIP=str(args.zip.resolve()),
+                REMOTEQGIS_TEST_SCRIPTS=str(ROOT / "tests/integration"),
             )
             if args.offscreen:
                 env["QT_QPA_PLATFORM"] = "offscreen"
@@ -114,7 +116,7 @@ def main():
             expect_http(port, "/api/v1/events", 403, {**upgrade, **auth, "Origin": "https://example.org"})
             print("PASS: HTTP response, unauthorized requests, and WebSocket upgrade authentication", flush=True)
             launch("client")
-            wait_for(root, "client-done", processes, 40)
+            wait_for(root, "client-done", processes, 85 if args.stage > 1 else 40)
             print((root / "client-done").read_text(encoding="utf-8"), flush=True)
             (root / "finish").touch()
             wait_for(root, "host-done", processes, 12)
