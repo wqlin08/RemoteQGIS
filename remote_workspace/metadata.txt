@@ -1,0 +1,12 @@
+[general]
+name=RemoteQGIS
+qgisMinimumVersion=3.40
+qgisMaximumVersion=3.99
+description=Connect two QGIS Desktop sessions to a remote GIS workspace.
+about=V0.1 verifies authenticated HTTP and WebSocket connectivity and displays the remote host and active project.
+version=0.1.0
+author=RemoteQGIS contributors
+email=
+category=Plugins
+tags=remote,workspace,websocket,tailscale
+experimental=True
