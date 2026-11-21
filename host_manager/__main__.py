@@ -36,10 +36,13 @@ def main():
                 raise ValueError("本地控制凭据须与访问令牌独立。")
             return run(app, home, settings, token, control, args.start_worker)
         from qgis.PyQt.QtCore import QTimer
+        from qgis.PyQt.QtGui import QIcon
         from qgis.PyQt.QtWidgets import QApplication
+        from .process import SOURCE
         from .window import Window
 
         app = QApplication([])
+        app.setWindowIcon(QIcon(str(SOURCE / "remote_workspace/icons/logo.png")))
         window = Window(home, settings)
         window.show()
         if args.smoke_test_ui:

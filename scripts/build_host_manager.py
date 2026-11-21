@@ -17,6 +17,7 @@ from build_plugin import ROOT, package_files
 
 MAC_NAME = "RemoteQGIS Host Manager.app"
 WINDOWS_NAME = "RemoteQGIS Host Manager"
+LOGO = ROOT / "logo.png"
 
 
 def stage_sources(source, plugin):
@@ -29,14 +30,28 @@ def stage_sources(source, plugin):
 
 
 def macos(stage, output, version, plugin):
+    if sys.platform != "darwin":
+        raise RuntimeError("Building the macOS app requires macOS iconutil, codesign and ditto.")
+
     bundle = stage / MAC_NAME / "Contents"
     for child in ("MacOS", "Resources"):
         (bundle / child).mkdir(parents=True)
     launcher = bundle / "MacOS/RemoteQGIS Host Manager"
     shutil.copy2(ROOT / "packaging/run-macos", launcher)
     launcher.chmod(0o755)
+    iconset = stage / "RemoteQGIS.iconset"
+    iconset.mkdir()
+    for size in (16, 32, 128, 256, 512):
+        for scale, suffix in ((1, ""), (2, "@2x")):
+            pixels = str(size * scale)
+            subprocess.run(["/usr/bin/sips", "-z", pixels, pixels, str(LOGO),
+                            "--out", str(iconset / f"icon_{size}x{size}{suffix}.png")],
+                           check=True, stdout=subprocess.DEVNULL)
+    icon = bundle / "Resources/RemoteQGIS.icns"
+    subprocess.run(["/usr/bin/iconutil", "-c", "icns", "-o", str(icon), str(iconset)], check=True)
     (bundle / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleExecutable": launcher.name,
+        "CFBundleIconFile": icon.name,
         "CFBundleName": "RemoteQGIS Host Manager",
         "CFBundleDisplayName": "RemoteQGIS Host Manager",
         "CFBundleIdentifier": "org.remoteqgis.host-manager.app",
@@ -47,23 +62,27 @@ def macos(stage, output, version, plugin):
         "NSHighResolutionCapable": True,
     }))
     stage_sources(bundle / "Resources/app", plugin)
-    if sys.platform == "darwin":
-        subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(bundle.parent)], check=True)
-        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(bundle.parent)], check=True)
-        subprocess.run(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(bundle.parent), str(output)], check=True)
-    else:
-        raise RuntimeError("Building the macOS app requires macOS codesign and ditto.")
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(bundle.parent)], check=True)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(bundle.parent)], check=True)
+    subprocess.run(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(bundle.parent), str(output)], check=True)
 
 
 def windows(stage, output, go, plugin):
+    compiler = shutil.which(go)
+    if compiler is None:
+        raise FileNotFoundError(f"Go compiler not found: {go}")
     target = stage / WINDOWS_NAME
     target.mkdir()
     launcher = target / (WINDOWS_NAME + ".exe")
-    subprocess.run([
-        go, "build", "-trimpath", "-ldflags", "-s -w -H windowsgui",
-        "-o", str(launcher), str(ROOT / "packaging/windows/launcher.go"),
-    ], env=dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0",
-                GO111MODULE="off", GOTOOLCHAIN="local"), check=True)
+    # Building the package links the native icon resource generated from logo.png with rsrc v0.10.2.
+    subprocess.run(
+        [str(Path(compiler).resolve()), "build", "-trimpath", "-ldflags", "-s -w -H windowsgui",
+         "-o", str(launcher), "."],
+        cwd=ROOT / "packaging/windows",
+        env=dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0",
+                 GO111MODULE="off", GOTOOLCHAIN="local"),
+        check=True,
+    )
     stage_sources(target / "app", plugin)
     shutil.copyfile(ROOT / "docs/host-manager.md", target / "使用说明.md")
     with ZipFile(output, "w", ZIP_DEFLATED, compresslevel=9) as archive:

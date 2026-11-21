@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from qgis.PyQt.QtCore import QLockFile, Qt, QTimer, QUrl
-from qgis.PyQt.QtGui import QDesktopServices, QIcon
+from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QSpinBox, QWidget,
@@ -18,7 +18,7 @@ from remote_workspace.common.manager_requests import ManagerRequests
 from remote_workspace.common.protocol import new_token
 
 from .autostart import configure, remove_macos_loaded
-from .process import SOURCE, manager_command, python_env, spawn
+from .process import manager_command, python_env, spawn
 from .settings import ACCOUNT, LOCAL_CONTROL, TITLE, Settings
 
 
@@ -35,7 +35,6 @@ class Window(QWidget):
         self.home, self.settings = home, settings
         self.path = home / "settings.json"
         self.setWindowTitle(TITLE)
-        self.setWindowIcon(QIcon(str(SOURCE / "remote_workspace/icons/logo.png")))
         self.setMinimumWidth(570)
         self.requests = ManagerRequests(self)
         self.token, self.control = "", ""
