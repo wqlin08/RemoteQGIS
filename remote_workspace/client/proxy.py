@@ -51,8 +51,9 @@ def vector_proxy(name: str, document: dict):
 
 
 class Proxies:
-    def __init__(self, connection, iface, changed, failure, rejected):
+    def __init__(self, connection, iface, changed, failure, rejected, *, read_only=False):
         self.connection, self.iface = connection, iface
+        self.read_only = read_only
         self.canvas = canvas = iface.mapCanvas()
         self.changed, self.failure = changed, failure
         self.tiles = RasterTiles(connection, canvas, failure)
@@ -77,7 +78,8 @@ class Proxies:
         self._view.timeout.connect(self._send_view)
         self._timer = QTimer(canvas, interval=350)
         self._timer.timeout.connect(self._sync_local)
-        self._timer.start()
+        if not self.read_only:
+            self._timer.start()
         canvas.extentsChanged.connect(self._schedule_view)
         canvas.rotationChanged.connect(self._schedule_view)
         canvas.layersChanged.connect(self._schedule_import_focus)
@@ -253,7 +255,7 @@ class Proxies:
 
     def install_vector(self, identifier, document):
         descriptor = self.descriptors[identifier]
-        working, record = self.edits.restore(descriptor, document)
+        working, record = (document, None) if self.read_only else self.edits.restore(descriptor, document)
         fresh = vector_proxy(descriptor["name"], working)
         old_id = self.layers.get(identifier)
         old = self.project.mapLayer(old_id) if old_id is not None else None
@@ -284,7 +286,7 @@ class Proxies:
                 self.project.removeMapLayer(old_id)
             if was_active:
                 self.iface.setActiveLayer(layer)
-        if working.get("editable"):
+        if working.get("editable") and not self.read_only:
             self.edits.attach(identifier, layer, document, record)
         self._layout()
         layer.triggerRepaint()
@@ -412,7 +414,7 @@ class Proxies:
             self.apply(result)
 
     def _schedule_view(self, *args):
-        if self.connection.ready and self.revision >= 0:
+        if not self.read_only and self.connection.ready and self.revision >= 0:
             self._view.start()
 
     def _initial_view(self, view):

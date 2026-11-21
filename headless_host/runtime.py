@@ -12,6 +12,7 @@ from remote_workspace.host.dependencies import load_tornado
 from remote_workspace.host.dispatch import Dispatcher
 from remote_workspace.host.processing import TERMINAL
 from remote_workspace.host.project import HostWorkspace
+from remote_workspace.host.lease import acquire
 from remote_workspace.host.qgis_info import host_info
 from remote_workspace.host.service import HostService
 
@@ -26,6 +27,15 @@ class HeadlessWorkspace(HostWorkspace):
 
 
 def serve(app, config, initial_project="", *, viewer_token=""):
+    lock = acquire(config.shared_directory)
+    try:
+        return _serve(app, config, initial_project, viewer_token)
+    finally:
+        QgsProject.instance().clear()
+        lock.unlock()
+
+
+def _serve(app, config, initial_project, viewer_token):
     load_tornado()
     project = QgsProject.instance()
     workspace = HeadlessWorkspace(config.shared_directory, view_adapter=HeadlessView(project))
@@ -83,5 +93,4 @@ def serve(app, config, initial_project="", *, viewer_token=""):
     timer.start()
     result = app.exec()
     timer.stop()
-    project.clear()
     return result

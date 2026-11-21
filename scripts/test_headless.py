@@ -86,6 +86,11 @@ def main():
                 proc.stdin.write(f"{token}\n{viewer}\n")
                 proc.stdin.flush()
                 wait_for(lambda: ready(port, token))
+                duplicate = subprocess.run([
+                    *command, "-m", "headless_host", "--profile", str(root / "other-profile"),
+                    "--directory", str(shared), "--port", str(free_port()),
+                ], cwd=root, input=f"{token}\n", capture_output=True, text=True, timeout=15)
+                assert duplicate.returncode == 1 and "共享目录已有" in duplicate.stderr
                 request(port, "bad", "/api/v1/info", status=401)
                 rpc(port, viewer, "project", {"action": "close"}, status=403)
                 folders = run("files")
@@ -98,7 +103,8 @@ def main():
                 assert manifest
                 data = request(port, viewer, f"/api/v3/raster/{key}/{raster['source_version']}/source.tif",
                                headers={"Range": "bytes=0-15"}, status=206)
-                assert len(data) == 16
+                with (shared / "测试数据/影像.tif").open("rb") as pixels:
+                    assert data == pixels.read(16)
                 descriptor = next(layer for layer in state["layers"] if layer["path"].endswith(".gpkg"))
                 vector = descriptor["id"]
                 before = run("enable_edit", {"id": vector})

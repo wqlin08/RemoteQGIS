@@ -6,21 +6,39 @@ if [ -d "$bundle/Resources/app" ]; then
 else
     source="$bundle"
 fi
+qgis_location="$HOME/Library/Application Support/RemoteQGIS Host/qgis-installation.txt"
 gis=${REMOTEQGIS_QGIS_APP:-}
+if [ -z "$gis" ] && [ -r "$qgis_location" ]; then
+    saved=$(cat "$qgis_location")
+    if [ -x "$saved/Contents/MacOS/bin/python3" ]; then gis="$saved"; fi
+fi
 if [ -z "$gis" ]; then
     for candidate in /Applications/QGIS-LTR.app /Applications/QGIS.app "$HOME/Applications/QGIS-LTR.app" "$HOME/Applications/QGIS.app"; do
         if [ -x "$candidate/Contents/MacOS/bin/python3" ]; then gis="$candidate"; break; fi
     done
 fi
 if [ -z "$gis" ] || [ ! -x "$gis/Contents/MacOS/bin/python3" ]; then
-    /usr/bin/osascript -e 'display alert "需要 QGIS 3.40 或更高的 3.x 版本" message "请将 QGIS-LTR.app 或 QGIS.app 安装到 Applications。"'
-    exit 1
+    if [ "${1:-}" = --daemon ]; then
+        echo "未找到配置的 QGIS 3.x 应用。" >&2
+        exit 1
+    fi
+    gis=$(/usr/bin/osascript -e 'POSIX path of (choose application with title "选择已安装的 QGIS 3.x")') || exit 1
+    gis=${gis%/}
+    if [ ! -x "$gis/Contents/MacOS/bin/python3" ]; then
+        /usr/bin/osascript -e 'display alert "需要 QGIS 3.40 或更高的 3.x 版本"'
+        exit 1
+    fi
+    umask 077
+    mkdir -p "$(dirname "$qgis_location")"
+    printf '%s\n' "$gis" > "$qgis_location"
 fi
 export REMOTEQGIS_QGIS_APP="$gis"
+export REMOTEQGIS_MANAGER_LAUNCHER="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
 export PYTHONHOME="$gis/Contents/MacOS"
 resources="$gis/Contents/Resources"
 export PYTHONPATH="$source:$resources/python:$resources/python/site-packages:$resources/python/plugins"
 export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
 export QGIS_PREFIX_PATH="$PYTHONHOME"
 export PROJ_LIB="$resources/proj"
 export GDAL_DATA="$resources/gdal"
@@ -30,4 +48,5 @@ if [ "${1:-}" = --python ]; then
     shift
     exec "$PYTHONHOME/bin/python3" "$@"
 fi
+cd "$source"
 exec "$PYTHONHOME/bin/python3" -m host_manager "$@"

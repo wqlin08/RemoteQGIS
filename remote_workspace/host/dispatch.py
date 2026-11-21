@@ -30,7 +30,7 @@ class Dispatcher(QObject):
             if not self.active:
                 raise WorkspaceError("工作站服务已停止。", 503)
             value = self.workspace.execute(operation, data)
-            if operation not in ("state", "files", "vector", "view", "processing_catalog", "processing_status", "processing_cancel"):
+            if operation not in ("state", "files", "vector", "view", "view_state", "processing_catalog", "processing_status", "processing_cancel"):
                 self.changed.emit()
             result.set_result(value)
         except Exception as exc:
