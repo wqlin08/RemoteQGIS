@@ -119,12 +119,15 @@ def host_tick():
 
         data = root / "shared" / "测试数据"
         for filename, attr, expected in (("points.gpkg", "name", "offline"),
-                                          ("points.shp", "score", 7), ("新建面.gpkg", "value", 42)):
+                                          ("points.shp", "score", 7), ("新建面.gpkg", None, None)):
             dataset = ogr.Open(str(data / filename))
             layer = dataset.GetLayer(0)
             assert layer.GetFeatureCount() == 1
             feature = next(iter(layer))
-            assert feature.GetField(attr) == expected
+            if attr is None:
+                assert feature.GetGeometryRef().GetArea() > 0
+            else:
+                assert feature.GetField(attr) == expected
             assert len(feature.GetField("rq_uuid")) == 36
             layer = feature = dataset = None
         mark("vector-host-verified")

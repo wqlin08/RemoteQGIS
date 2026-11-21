@@ -7,7 +7,7 @@ from qgis.core import (
     QgsProject, QgsRasterLayer,
 )
 from qgis.PyQt.QtCore import QTimer, QUrl
-from qgis.PyQt.QtNetwork import QNetworkRequest
+from qgis.PyQt.QtNetwork import QNetworkReply, QNetworkRequest
 
 from ..common.workspace import TILES
 
@@ -15,11 +15,15 @@ HALF_WORLD = 20037508.342789244
 
 
 class RasterTiles:
-    def __init__(self, connection, canvas):
+    def __init__(self, connection, canvas, failure):
         self.connection = connection
         self.canvas = canvas
+        self.failure = failure
         self.descriptors = []
         self._preprocessor = None
+        self._reported = set()
+        self._network = QgsNetworkAccessManager.instance()
+        self._network.finished.connect(self._tile_finished)
         self._replies = []
         self._timer = QTimer(canvas, interval=300, singleShot=True)
         self._timer.timeout.connect(self.prefetch)
@@ -28,6 +32,7 @@ class RasterTiles:
         self.hits = self.requests = 0
 
     def _status(self, state, _):
+        self._reported.clear()
         if self._preprocessor:
             QgsNetworkAccessManager.removeRequestPreprocessor(self._preprocessor)
             self._preprocessor = None
@@ -59,6 +64,29 @@ class RasterTiles:
         if not layer.isValid():
             raise ValueError("QGIS 无法建立 XYZ 影像代理。")
         return layer
+
+    def _tile_finished(self, reply):
+        error = reply.error()
+        if not self.connection.ready or error in (QNetworkReply.NoError, QNetworkReply.OperationCanceledError):
+            return
+        url = reply.request().url().toString()
+        prefix = self.connection.origin + TILES + "/"
+        if not url.startswith(prefix):
+            return
+        parts = url[len(prefix):].split("/", 2)
+        if len(parts) != 3:
+            return
+        identifier, version, _ = parts
+        descriptor = next((item for item in self.descriptors
+                           if item["id"] == identifier and item["tile_version"] == version), None)
+        if descriptor is None:
+            return
+        status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        report = (identifier, version, status, error)
+        if report not in self._reported:
+            self._reported.add(report)
+            reason = f"HTTP {status}" if status is not None else reply.errorString()
+            self.failure(f"影像「{descriptor['name']}」的瓦片加载失败（{reason}）。")
 
     def _cancel(self):
         self._timer.stop()
@@ -107,6 +135,7 @@ class RasterTiles:
         reply.deleteLater()
 
     def close(self):
+        self._network.finished.disconnect(self._tile_finished)
         self.connection.status_changed.disconnect(self._status)
         self.canvas.extentsChanged.disconnect(self._schedule)
         self._status("idle", "")

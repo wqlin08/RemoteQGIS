@@ -118,7 +118,7 @@ class HostWorkspace:
                 raise WorkspaceError(f"无法加载数据 {path.name}。")
             layers.extend(new)
         self.project.addMapLayers(layers)
-        return self.state({})
+        return dict(self.state({}), imported=[layer.id() for layer in layers])
 
     def source(self, layer):
         if layer.providerType() not in ("ogr", "gdal"):

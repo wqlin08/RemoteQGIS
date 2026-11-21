@@ -12,7 +12,7 @@ from .rasters import RasterTiles
 from .edits import ClientEdits
 from ..common.edits import IDENTITY
 from ..common.layers import apply_style, apply_tree, opacity, read_style, read_tree, set_opacity, validate_tree
-from ..common.vector import fields_from, geometry_from, unpack
+from ..common.vector import field_data, fields_from, geometry_from, unpack
 
 
 def crs_from(wkt: str, authority: str = ""):
@@ -48,10 +48,11 @@ def vector_proxy(name: str, document: dict):
 
 
 class Proxies:
-    def __init__(self, connection, canvas, changed, failure):
-        self.connection, self.canvas = connection, canvas
+    def __init__(self, connection, iface, changed, failure):
+        self.connection, self.iface = connection, iface
+        self.canvas = canvas = iface.mapCanvas()
         self.changed, self.failure = changed, failure
-        self.tiles = RasterTiles(connection, canvas)
+        self.tiles = RasterTiles(connection, canvas, failure)
         self.edits = ClientEdits(self)
         self.project = QgsProject.instance()
         self.layers, self.descriptors = {}, {}
@@ -64,6 +65,9 @@ class Proxies:
         self._baseline = None
         self._loading = self._refresh_pending = self._sending = False
         self._workspace_open = True
+        self._import_focus = set()
+        self._zoom_import = QTimer(canvas, interval=0, singleShot=True)
+        self._zoom_import.timeout.connect(self._focus_imported_rasters)
         self._view = QTimer(canvas, interval=500, singleShot=True)
         self._view.timeout.connect(self._send_view)
         self._timer = QTimer(canvas, interval=350)
@@ -71,6 +75,7 @@ class Proxies:
         self._timer.start()
         canvas.extentsChanged.connect(self._schedule_view)
         canvas.rotationChanged.connect(self._schedule_view)
+        canvas.layersChanged.connect(self._schedule_import_focus)
         self.project.cleared.connect(self._local_project_cleared)
         connection.workspace_changed.connect(self.refresh)
         connection.status_changed.connect(self._status)
@@ -163,6 +168,7 @@ class Proxies:
         self._layout()
         if (new_session or changed_project) and state.get("view"):
             self._initial_view(state["view"])
+        self._schedule_import_focus()
         self.changed()
 
     def _request_vector(self, key):
@@ -191,17 +197,80 @@ class Proxies:
     def install_vector(self, identifier, document):
         descriptor = self.descriptors[identifier]
         working, record = self.edits.restore(descriptor, document)
-        layer = vector_proxy(descriptor["name"], working)
-        old = self.layers.get(identifier)
+        fresh = vector_proxy(descriptor["name"], working)
+        old_id = self.layers.get(identifier)
+        old = self.project.mapLayer(old_id) if old_id is not None else None
+        if old is not None and old.isEditable():
+            return
+        was_active = old is not None and old == self.iface.activeLayer()
         self.edits.detach(identifier)
-        self._add(identifier, layer)
-        self._layout()
-        if old is not None:
-            self.project.removeMapLayer(old)
+        same_schema = (old is not None and old.wkbType() == fresh.wkbType() and old.crs() == fresh.crs()
+                       and [field_data(field) for field in old.fields()] ==
+                       [field_data(field) for field in fresh.fields()])
+        if same_schema:
+            # The canvas, legend and native digitizing tools retain the same layer ID.
+            provider = old.dataProvider()
+            prior_ids = old.allFeatureIds()
+            features = list(fresh.getFeatures())
+            ok, added = provider.addFeatures(features)
+            if not ok or prior_ids and not provider.deleteFeatures(prior_ids):
+                provider.deleteFeatures({feature.id() for feature in added if feature.id() not in prior_ids})
+                raise ValueError("无法更新本地矢量代理。")
+            old.updateExtents(True)
+            self._unavailable.discard(identifier)
+            layer = old
+        else:
+            layer = fresh
+            self._add(identifier, layer)
+            self._layout()
+            if old is not None:
+                self.project.removeMapLayer(old_id)
+            if was_active:
+                self.iface.setActiveLayer(layer)
         if working.get("editable"):
             self.edits.attach(identifier, layer, document, record)
         self._layout()
+        layer.triggerRepaint()
+        self.canvas.refresh()
         self.changed()
+
+    def reveal_imported_rasters(self, response, paths):
+        imported = response.get("imported")
+        self._import_focus.update(layer["id"] for layer in response["layers"] if layer["kind"] == "raster"
+                                  and (layer["id"] in imported if imported is not None else layer["path"] in paths))
+        self._schedule_import_focus()
+
+    def _schedule_import_focus(self):
+        if self._import_focus:
+            self._zoom_import.start()
+
+    def _focus_imported_rasters(self):
+        visible = {layer.id() for layer in self.canvas.layers()}
+        ready = {key for key in self._import_focus if self.layers.get(key) in visible}
+        self._import_focus.difference_update(ready | self._unavailable)
+        if ready:
+            self.zoom_to_rasters(ready)
+
+    def zoom_to_rasters(self, keys):
+        extent = QgsRectangle()
+        crs = self.canvas.mapSettings().destinationCrs()
+        for key in keys:
+            desc = self.descriptors[key]
+            source = crs_from(desc["wkt"], desc["crs"])
+            try:
+                if source.isValid():
+                    rect = QgsCoordinateTransform(source, crs, self.project).transformBoundingBox(
+                        QgsRectangle(*desc["bounds"]))
+                    if not rect.isEmpty():
+                        extent.combineExtentWith(rect)
+            except Exception:
+                continue
+        if extent.isEmpty():
+            self.failure("无法定位影像，请检查工作站图层的坐标系和范围。")
+            return
+        extent.scale(1.05)
+        self.canvas.setExtent(extent)
+        self.canvas.refresh()
 
     @staticmethod
     def _style(layer, descriptor):
@@ -310,6 +379,8 @@ class Proxies:
 
     def clear(self):
         self._baseline = None
+        self._import_focus.clear()
+        self._zoom_import.stop()
         for key in tuple(self.edits.records):
             self.edits.detach(key)
         self.project.removeMapLayers(list(self.layers.values()))
@@ -338,6 +409,7 @@ class Proxies:
         self.layers.clear()
         self.revision = -1
         self._view.stop()
+        self._import_focus.clear()
         QTimer.singleShot(100, self.refresh)
 
     def close(self):
@@ -349,8 +421,10 @@ class Proxies:
         self._view.deleteLater()
         self.canvas.extentsChanged.disconnect(self._schedule_view)
         self.canvas.rotationChanged.disconnect(self._schedule_view)
+        self.canvas.layersChanged.disconnect(self._schedule_import_focus)
         self.connection.workspace_changed.disconnect(self.refresh)
         self.connection.status_changed.disconnect(self._status)
         self.tiles.close()
         self.edits.close()
         self.clear()
+        self._zoom_import.deleteLater()

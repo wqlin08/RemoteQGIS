@@ -4,11 +4,28 @@
 
 from uuid import uuid4
 
+import numpy as np
 from osgeo import gdal, ogr, osr
 
-from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsMimeDataUtils, QgsRasterLayer, QgsRectangle, QgsVectorLayer
-from qgis.PyQt.QtCore import QVariant
+from qgis.core import (
+    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsField, QgsGeometry, QgsMimeDataUtils, QgsRasterLayer,
+    QgsRectangle, QgsVectorLayer,
+)
+from qgis.PyQt.QtCore import QPoint, Qt, QTimer, QVariant
 from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QApplication
+
+
+def layer_in_canvas(canvas, identifier):
+    return any(layer.id() == identifier for layer in canvas.layers())
+
+
+def canvas_center_color(canvas):
+    if canvas.isDrawing():
+        return None
+    image = canvas.viewport().grab().toImage()
+    return image.pixelColor(image.width() // 2, image.height() // 2)
 
 
 def fixtures(root, version):
@@ -21,10 +38,12 @@ def fixtures(root, version):
         str(directory / "影像.tif"), size, size, 3, gdal.GDT_UInt16,
         options=["TILED=YES", "COMPRESS=DEFLATE"],
     )
-    raster.SetGeoTransform((-2, 4 / size, 0, 2, 0, -4 / size))
+    raster.SetGeoTransform((99, 4 / size, 0, 31, 0, -4 / size))
     raster.SetProjection(srs.ExportToWkt())
     for i in range(1, 4):
-        raster.GetRasterBand(i).Fill(i * 1000)
+        band = raster.GetRasterBand(i)
+        band.Fill(i * 1000)
+        band.WriteArray(np.full((size, size // 4), 4000, dtype=np.uint16))
     if version >= 3:
         raster.BuildOverviews("AVERAGE", [2, 4, 8, 16])
     raster = None
@@ -63,7 +82,10 @@ class Scenario:
             mime = browser.tree.mimeData([data_items["影像.tif"]])
             uri, = QgsMimeDataUtils.decodeUriList(mime)
             assert uri.layerType == "custom" and uri.providerKey == "remoteqgis"
-            assert browser.drop_handler.handleCustomUriCanvasDrop(uri, self.panel.iface.mapCanvas())
+            canvas = self.panel.iface.mapCanvas()
+            canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+            canvas.setExtent(QgsRectangle(-2, -2, 2, 2))
+            assert browser.drop_handler.handleCustomUriCanvasDrop(uri, canvas)
             for name in ("points.gpkg", "points.shp"):
                 data_items[name].setSelected(True)
             browser.import_selected()
@@ -88,7 +110,23 @@ class Scenario:
             raster, = [desc for desc in proxies.descriptors.values() if desc["kind"] == "raster"]
             self.raster_id = raster["id"]
             self.tile_version = raster["tile_version"]
-            self.connection.call("pixel", {"id": self.raster_id, "x": 0.2, "y": 0.2}, self._pixel)
+            canvas = self.panel.iface.mapCanvas()
+            to_image = QgsCoordinateTransform(canvas.mapSettings().destinationCrs(),
+                                              QgsCoordinateReferenceSystem("EPSG:4326"), proxies.project)
+            center = to_image.transform(canvas.extent().center())
+            if not 99 < center.x() < 103:
+                self._focus_checks = getattr(self, "_focus_checks", 0) + 1
+                assert self._focus_checks < 30, ("Canvas did not zoom to the imported raster", center,
+                                                 canvas.extent(), canvas.mapSettings().destinationCrs().authid(),
+                                                 browser.message.text())
+                return False
+            assert layer_in_canvas(canvas, proxies.layers[self.raster_id]), "Raster is missing from the canvas"
+            color = canvas_center_color(canvas)
+            if color is None or color.lightness() >= 240:
+                self._import_checks = getattr(self, "_import_checks", 0) + 1
+                assert self._import_checks < 50, ("Imported raster was blank before changing its style", color)
+                return False
+            self.connection.call("pixel", {"id": self.raster_id, "x": 101.2, "y": 29.2}, self._pixel)
             self.step = 5
         if self.step == 6:
             raster = proxies.descriptors[self.raster_id]
@@ -97,10 +135,17 @@ class Scenario:
             layer = proxies.project.mapLayer(proxies.layers[self.raster_id])
             assert isinstance(layer, QgsRasterLayer) and layer.isValid(), layer
             # Native provider work exercises its network preprocessor and PNG decode.
-            block = layer.dataProvider().block(1, QgsRectangle(24000, 24000, 50000, 50000), 16, 16)
+            block = layer.dataProvider().block(1, QgsRectangle(11240000, 3350000, 11260000, 3370000), 16, 16)
             assert block.isValid() and not block.isEmpty()
             color = block.color(8, 8)
             assert (color >> 24) == 255 and 120 <= (color & 255) <= 135, hex(color)
+            self.step = 61
+        if self.step == 61:
+            color = canvas_center_color(self.panel.iface.mapCanvas())
+            if color is None or not 120 <= color.red() <= 135:
+                self._canvas_checks = getattr(self, "_canvas_checks", 0) + 1
+                assert self._canvas_checks < 50, ("Raster did not render on the canvas", color)
+                return False
             self.mark("raster-verified")
             self.step = 7
         if self.step == 7:
@@ -218,22 +263,61 @@ class Scenario:
             if layer is None:
                 return False
             self.new_id = layer.customProperty("remoteqgis/id")
-            assert layer.startEditing()
-            feature = QgsFeature(layer.fields())
-            feature["value"] = 42
-            feature.setGeometry(QgsGeometry.fromWkt("Polygon ((0 0, 0 1, 1 1, 1 0, 0 0))"))
-            assert layer.addFeature(feature)
-            assert layer.commitChanges(), layer.commitErrors()
-            self.step = 20
+            self.new_local = layer.id()
+            self._draw_polygon(layer)
         if self.step == 20 and not proxies.edits.working_pending(self.new_id):
             layer = proxies._local_layers()[self.new_id]
-            assert layer.featureCount() == 1 and next(layer.getFeatures())["value"] == 42
+            assert layer.id() == self.new_local
+            assert self.panel.iface.activeLayer() == layer
+            assert layer.featureCount() == 1 and next(layer.getFeatures()).geometry().area() > 0
+            canvas = self.panel.iface.mapCanvas()
+            assert layer_in_canvas(canvas, layer.id()), "Saved polygon is missing from the canvas"
+            color = canvas_center_color(canvas)
+            if color is None or color.name() != self.polygon_color:
+                self._polygon_checks = getattr(self, "_polygon_checks", 0) + 1
+                assert self._polygon_checks < 50, ("Saved polygon did not render on the canvas", color)
+                return False
             self.mark("vector-verified")
             self.step = 21
         if self.step == 21 and (self.root / "vector-host-verified").exists():
             self.step = 22
             self.connection.call("project", {"action": "save"}, self._final_save)
         return self.step == 24
+
+    def _draw_polygon(self, layer):
+        self.step = 191
+        iface = self.panel.iface
+        canvas = iface.mapCanvas()
+        canvas.setRotation(0)
+        transform = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:4326"),
+                                          canvas.mapSettings().destinationCrs(), self.browser.proxies.project)
+        canvas.setExtent(transform.transformBoundingBox(QgsRectangle(100, 28, 102, 30)))
+        canvas.refresh()
+        assert iface.setActiveLayer(layer) and layer.startEditing()
+        self.polygon_color = layer.renderer().symbol().color().name()
+        add_feature = iface.actionAddFeature()
+        assert add_feature.isEnabled()
+        add_feature.trigger()
+        viewport = canvas.viewport()
+        center = viewport.rect().center()
+        modal = []
+
+        def dismiss_form():
+            widget = QApplication.activeModalWidget()
+            if widget is not None:
+                modal.append(widget.windowTitle())
+                widget.reject()
+
+        for offset in (QPoint(-30, -30), QPoint(30, -30), QPoint(30, 30), QPoint(-30, 30)):
+            QTest.mouseClick(viewport, Qt.LeftButton, pos=center + offset)
+        QTimer.singleShot(150, dismiss_form)
+        QTest.mouseClick(viewport, Qt.RightButton, pos=center)
+        QTest.qWait(180)
+        assert not modal, f"A new polygon with no user fields opened a form: {modal}"
+        assert layer.featureCount() == 1, "Native right-click did not finish the polygon"
+        assert layer.commitChanges(), layer.commitErrors()
+        self.step = 20
+
 
     def _path_test(self, result, error):
         assert error and result is None
@@ -277,7 +361,7 @@ class Scenario:
     def _replayed(self, doc, error):
         assert not error and len(doc["features"]) == 1, (doc, error)
         self.connection.call("create_vector", {"path": "测试数据/新建面.gpkg", "crs": "EPSG:4326",
-                                               "geometry": "Polygon", "fields": [["value", 2, 0, 0, 0]]},
+                                               "geometry": "Polygon", "fields": []},
                              self._created)
 
     def _created(self, _, error):

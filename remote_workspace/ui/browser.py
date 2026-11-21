@@ -2,7 +2,7 @@
 
 from pathlib import PurePosixPath
 
-from qgis.core import QgsCoordinateTransform, QgsMimeDataUtils, QgsProject, QgsRectangle
+from qgis.core import QgsCoordinateTransform, QgsMimeDataUtils, QgsProject
 from qgis.gui import QgsCustomDropHandler, QgsMapToolEmitPoint
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
@@ -67,7 +67,7 @@ class Browser(QWidget):
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setDragEnabled(True)
         self.tree.itemDoubleClicked.connect(self._open)
-        self.proxies = Proxies(connection, iface.mapCanvas(), self._refresh_layers, self.show_error)
+        self.proxies = Proxies(connection, iface, self._refresh_layers, self.show_error)
         self.vector_actions = VectorActions(self)
         self.drop_handler = RemoteDropHandler(self)
         iface.registerCustomDropHandler(self.drop_handler)
@@ -187,11 +187,13 @@ class Browser(QWidget):
             return
         self.show_error("正在工作站加载所选数据…")
 
-        def complete(_result, error):
+        def complete(result, error):
             if error:
                 self.show_error(error)
             else:
-                self.show_error("工作站已导入，正在更新代理图层。")
+                self.show_error("工作站已导入所选数据。")
+                self.proxies.apply(result)
+                self.proxies.reveal_imported_rasters(result, paths)
                 self.proxies.refresh()
 
         self.connection.call("import", {"paths": paths}, complete)
@@ -280,12 +282,7 @@ class Browser(QWidget):
     def _zoom_raster(self):
         descriptor = self.active_descriptor("raster")
         if descriptor:
-            try:
-                rect = self._raster_transform(descriptor).transformBoundingBox(QgsRectangle(*descriptor["bounds"]))
-                self.iface.mapCanvas().setExtent(rect)
-                self.iface.mapCanvas().refresh()
-            except Exception:
-                self.show_error("无法将影像范围转换到当前地图坐标系。")
+            self.proxies.zoom_to_rasters([descriptor["id"]])
 
     def _render_raster(self):
         descriptor = self.active_descriptor("raster")
