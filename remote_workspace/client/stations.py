@@ -166,6 +166,10 @@ class Stations(QWidget):
                     else:
                         self.panel._client_status("error", f"管理服务请求失败（HTTP {status or '超时'}）。")
                     return
+                if value.get("port_in_use"):
+                    self.pending = None
+                    self.panel._client_status("error", value["detail"])
+                    return
                 if value["state"] == "running":
                     if value.get("port") != profile["port"]:
                         self.pending = None

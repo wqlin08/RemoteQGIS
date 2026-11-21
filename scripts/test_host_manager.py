@@ -60,7 +60,18 @@ def main():
             wait_for(lambda: ready(manager_port, token) or proc.poll() is not None)
             assert proc.poll() is None, proc.stdout.read()
             assert state("stopped")
+            with socket.socket() as occupied:
+                occupied.bind(("127.0.0.1", gis_port))
+                occupied.listen()
+                rpc(manager_port, token, "manager_start")
+                conflict = wait_for(lambda: (value := state("error")) and value.get("port_in_use") and value)
+                assert conflict.get("port_in_use") and not conflict["requested"], conflict
+                assert f"127.0.0.1:{gis_port}" in conflict["detail"] and "已被占用" in conflict["detail"]
+                assert "unclosed <socket.socket" not in (home / "host.log").read_text(encoding="utf-8")
+                assert occupied.getsockname()[1] == gis_port
             if args.client_zip:
+                rpc(manager_port, token, "manager_stop", {"control": control})
+                wait_for(lambda: state("stopped"))
                 desktop_roundtrip(home, token, args)
             else:
                 rpc(manager_port, token, "manager_start")

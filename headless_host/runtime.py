@@ -14,7 +14,7 @@ from remote_workspace.host.processing import TERMINAL
 from remote_workspace.host.project import HostWorkspace
 from remote_workspace.host.lease import acquire
 from remote_workspace.host.qgis_info import host_info
-from remote_workspace.host.service import HostService
+from remote_workspace.host.service import HostService, PORT_IN_USE_EXIT_CODE
 
 from .view import HeadlessView
 
@@ -60,9 +60,10 @@ def _serve(app, config, initial_project, viewer_token):
 
     def tick():
         nonlocal exit_code
-        if service.status.state == "error" and not stopping:
-            print(service.status.detail, file=sys.stderr, flush=True)
-            exit_code = 1
+        status = service.status
+        if status.state == "error" and not stopping:
+            print(status.detail, file=sys.stderr, flush=True)
+            exit_code = PORT_IN_USE_EXIT_CODE if status.port_in_use else 1
             stop()
         if stopping:
             if (service.status.state in ("stopped", "error")

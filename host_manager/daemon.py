@@ -21,7 +21,7 @@ from remote_workspace.common.workspace import WorkspaceError
 from remote_workspace.host.config import HostConfig
 from remote_workspace.host.dependencies import load_tornado
 from remote_workspace.host.dispatch import Dispatcher
-from remote_workspace.host.service import HostService
+from remote_workspace.host.service import HostService, PORT_IN_USE_EXIT_CODE, port_in_use_message
 
 from .process import SOURCE, spawn, python_env
 
@@ -40,6 +40,7 @@ class Manager:
         self.worker = self.preview = None
         self.worker_state, self.detail = "stopped", ""
         self.wanted = self.closing = False
+        self.port_in_use = False
         self.preview_token = ""
         self.failure_count = 0
         self.retry_at = self.deadline = self.next_health = 0
@@ -59,6 +60,7 @@ class Manager:
             if not self.wanted:
                 self.failure_count = 0
                 self.retry_at = 0
+                self.port_in_use = False
             self.wanted = True
         elif operation == "manager_preview":
             if self.closing or self.worker_state != "running":
@@ -69,6 +71,7 @@ class Manager:
             if not isinstance(control, str) or not control.isascii() or not hmac.compare_digest(control, self.local_control):
                 raise WorkspaceError("需要工作站本地控制凭据。", 403)
             self.wanted = False
+            self.port_in_use = False
             if operation == "manager_shutdown":
                 self.closing = True
         elif operation != "manager_status":
@@ -78,7 +81,8 @@ class Manager:
     def status(self):
         return {"manager": 1, "state": self.worker_state, "detail": self.detail, "port": self.config.port,
                 "preview": self.preview is not None and self.preview.poll() is None,
-                "preview_allowed": self.settings.allow_preview, "requested": self.wanted}
+                "preview_allowed": self.settings.allow_preview, "requested": self.wanted,
+                "port_in_use": self.port_in_use}
 
     def launch_worker(self):
         self.preview_token = new_token()
@@ -116,7 +120,11 @@ class Manager:
             self.stop_worker()
             self.worker.stdin.close()
             self.worker = None
-            if self.wanted:
+            if self.wanted and code == PORT_IN_USE_EXIT_CODE:
+                self.wanted = False
+                self.port_in_use = True
+                self.worker_state, self.detail = "error", port_in_use_message(self.config)
+            elif self.wanted:
                 self.failure_count += 1
                 self.retry_at = time.monotonic() + min(30, 2 ** min(self.failure_count, 5))
                 self.worker_state, self.detail = "error", f"Host 已退出（{code}），即将重试。详见 host.log。"
@@ -133,7 +141,7 @@ class Manager:
                 self.app.exit(int(self.service.status.state == "error"))
         elif not self.wanted:
             self.stop_worker()
-            if self.worker is None:
+            if self.worker is None and not self.port_in_use:
                 self.worker_state, self.detail = "stopped", ""
         elif self.worker is None and time.monotonic() >= self.retry_at:
             try:
