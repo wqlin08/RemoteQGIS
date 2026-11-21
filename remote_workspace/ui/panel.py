@@ -9,10 +9,12 @@ from qgis.PyQt.QtWidgets import (
 
 from ..client.connection import Connection, endpoint
 from ..client.processing import RemoteToolbox
+from ..client.stations import Stations
 from ..common.protocol import HostInfo, new_token
 from ..host.config import HostConfig
 from ..host.dispatch import Dispatcher
 from ..host.project import HostWorkspace
+from ..host.lease import acquire, release_when_idle
 from ..host.dependencies import load_tornado
 from ..host.qgis_info import environment, host_info, validate_environment
 from ..host.service import HostService
@@ -39,6 +41,7 @@ class WorkspacePanel(QDockWidget):
         super().__init__("RemoteQGIS", iface.mainWindow())
         self.iface = iface
         self._dispatcher = None
+        self._lease = None
         self.setObjectName("RemoteQGISWorkspace")
         self._host = None
         self._host_state = "stopped"
@@ -116,7 +119,7 @@ class WorkspacePanel(QDockWidget):
         self.connect_button = QPushButton("连接")
         self.connect_button.clicked.connect(self._connect)
         self.disconnect_button = QPushButton("断开")
-        self.disconnect_button.clicked.connect(self._connection.stop)
+        self.disconnect_button.clicked.connect(self._disconnect)
         buttons = QHBoxLayout()
         buttons.addWidget(self.connect_button)
         buttons.addWidget(self.disconnect_button)
@@ -130,6 +133,8 @@ class WorkspacePanel(QDockWidget):
         layout.addRow("端口", self.remote_port)
         layout.addRow("访问令牌", self.remote_token)
         layout.addRow(self.secure)
+        self.stations = Stations(self)
+        layout.addRow(self.stations)
         layout.addRow(buttons)
         layout.addRow(self.client_status)
         layout.addRow(remote)
@@ -150,12 +155,16 @@ class WorkspacePanel(QDockWidget):
                 self.bind_address.text(), self.bind_port.value(), self.directory.text(), self.host_token.text()
             )
             load_tornado()
+            self._lease = acquire(config.shared_directory, desktop=True)
             self._last_info = host_info()
             self._workspace = HostWorkspace(config.shared_directory, self.iface.mapCanvas())
             self._dispatcher = Dispatcher(self._workspace, self)
             self._dispatcher.changed.connect(self._publish_snapshot)
             self._host = HostService(config, self._last_info, self._dispatcher)
         except (ValueError, RuntimeError) as exc:
+            if self._lease is not None:
+                self._lease.unlock()
+                self._lease = None
             self._show_host_status("error", str(exc))
             return
         self._show_host_status("starting", "正在启动服务…")
@@ -172,6 +181,7 @@ class WorkspacePanel(QDockWidget):
         status = self._host.status
         if status.state in ("stopped", "error"):
             self._host_timer.stop()
+            self._release_host_lease()
             self._host = None
             self._dispatcher.active = False
             self._dispatcher.deleteLater()
@@ -184,6 +194,11 @@ class WorkspacePanel(QDockWidget):
             self._show_host_status(status.state, status.detail or details.get(status.state, ""))
         if status.state == "running":
             self._publish_snapshot()
+
+    def _release_host_lease(self):
+        if self._lease is not None:
+            release_when_idle(self._lease, self._host, self._workspace.processing)
+            self._lease = None
 
     def _publish_snapshot(self):
         snapshot = host_info()
@@ -202,6 +217,10 @@ class WorkspacePanel(QDockWidget):
         except (ValueError, RuntimeError) as exc:
             self._client_status("error", str(exc))
 
+    def _disconnect(self):
+        self.stations.cancel()
+        self._connection.stop()
+
     def _show_host_info(self, info: HostInfo):
         values = (info.hostname, info.qgis_version, info.platform, info.project_name)
         for label, value in zip(self.info_labels, values):
@@ -218,6 +237,8 @@ class WorkspacePanel(QDockWidget):
 
     def _client_status(self, state: str, detail: str):
         self.client_status.setText(detail)
+        if state in ("idle", "error") and not self._connection.active:
+            self.stations.cancel()
         if state != "connected":
             for label in self.info_labels:
                 label.setText("—")
@@ -233,7 +254,8 @@ class WorkspacePanel(QDockWidget):
 
     def _update_controls(self):
         hosting = self._host is not None
-        connecting = self._connection.active
+        connecting = self._connection.active or self.stations.pending is not None
+        self.stations.update_buttons()
         self.start_host.setEnabled(not hosting and not connecting)
         self.stop_host.setEnabled(hosting and self._host_state != "stopping")
         self.connect_button.setEnabled(not hosting and not connecting)
@@ -249,8 +271,9 @@ class WorkspacePanel(QDockWidget):
             self._dispatcher.active = False
             self._workspace.processing.close()
             self._host.stop()
+            self._release_host_lease()
         self._toolbox.close()
         self.browser.shutdown()
-        self._connection.stop()
+        self._disconnect()
         self.host_token.clear()
         self.remote_token.clear()
