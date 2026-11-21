@@ -12,8 +12,8 @@ import sys
 
 from pyplugin_installer import instance as plugin_installer
 from qgis import utils
-from qgis.core import Qgis, QgsProject
-from qgis.PyQt.QtCore import QTimer
+from qgis.core import Qgis, QgsNetworkAccessManager, QgsProject
+from qgis.PyQt.QtCore import QTimer, QUrl
 
 faulthandler.enable()
 root = Path(os.environ["REMOTEQGIS_TEST_ROOT"])
@@ -51,6 +51,17 @@ def setup():
     assert utils.isPluginLoaded(key), "QGIS could not install and start the ZIP"
     from processing.core.Processing import Processing
     Processing.initialize()
+
+    def fixture_tiles(request):
+        url = request.url()
+        if url.host() == "example.invalid" and url.path().startswith("/remoteqgis-fixture/"):
+            forwarded = QUrl(url)
+            forwarded.setScheme("http")
+            forwarded.setHost("127.0.0.1")
+            forwarded.setPort(settings["tiles"])
+            request.setUrl(forwarded)
+
+    QgsNetworkAccessManager.setRequestPreprocessor(fixture_tiles)
     plugin = utils.plugins[key]
     plugin._action.trigger()
     panel = plugin._panel
@@ -141,6 +152,16 @@ def host_tick():
             assert len(feature.GetField("rq_uuid")) == 36
             layer = feature = dataset = None
         mark("vector-host-verified")
+    if (stage == 4 and (root / "online-dragged").exists() and not (root / "online-host-verified").exists()):
+        from workspace_scenario import canvas_center_color
+
+        matched = [layer for layer in project.mapLayers().values() if layer.customProperty("remoteqgis/online")]
+        if matched:
+            assert len(matched) == 1 and matched[0].name() == "在线测试瓦片"
+            assert not project.mapLayersByName("本地拒绝测试")
+            pixel = canvas_center_color(panel.iface.mapCanvas())
+            if pixel is not None and pixel.name() == "#2468ac":
+                mark("online-host-verified")
     if stage == 4 and (root / "finish").exists():
         service = panel._host
         assert utils.unloadPlugin(key)

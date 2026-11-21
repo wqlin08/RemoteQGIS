@@ -11,7 +11,11 @@ from .workspace import WorkspaceError
 
 GROUP_ID = "remoteqgis/group"
 RENDERERS = {"singleSymbol", "categorizedSymbol", "graduatedSymbol", "RuleRenderer", "nullSymbol"}
-SYMBOL_LAYERS = {"SimpleMarker", "SimpleLine", "SimpleFill"}
+SYMBOL_LAYERS = {
+    "SimpleMarker", "SimpleLine", "SimpleFill", "EllipseMarker", "FilledMarker", "MarkerLine",
+    "HashedLine", "PointPatternFill", "LinePatternFill", "CentroidFill", "GradientFill",
+    "ShapeburstFill", "RandomMarkerFill",
+}
 RASTER_RENDERERS = {"paletted", "singlebandgray", "singlebandpseudocolor", "multibandcolor",
                     "singlebandcolordata", "hillshade", "contour"}
 RASTER_PROPERTIES = QgsMapLayer.Symbology | QgsMapLayer.Rendering | QgsMapLayer.Legend

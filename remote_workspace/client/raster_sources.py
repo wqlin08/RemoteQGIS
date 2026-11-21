@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from functools import partial
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
@@ -18,6 +18,10 @@ SOURCE = "/api/v3/raster"
 ROUTE = r"/[0-9a-f]{32}/([A-Za-z0-9_]+)/([0-9a-f]{24})/(source\.tif(?:\.ovr|\.msk)?)"
 RANGE = re.compile(r"bytes=(\d{1,20})-(\d{1,20})")
 CHUNK = 16 * 1024 * 1024
+
+
+class RasterRelay(ThreadingHTTPServer):
+    request_queue_size = 128
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -41,13 +45,16 @@ class RelayHandler(BaseHTTPRequestHandler):
         request_range = self.headers.get("Range", "")
         large = RANGE.fullmatch(request_range)
         try:
+            if self.command == "GET" and request_range.startswith("bytes=") and "," in request_range:
+                self.forward_multiple(endpoint, header, path, request_range[6:])
+                return
             if self.command == "GET" and large:
                 start, end = map(int, large.groups())
                 if start <= end and end - start + 1 > CHUNK:
                     self.forward_large(endpoint, header, path, start, end)
                     return
             self.send_upstream(endpoint, header, path, request_range)
-        except (OSError, ValueError, EOFError):
+        except (OSError, ValueError, EOFError, HTTPException):
             self.close_connection = True
 
     def upstream(self, endpoint, header, path, request_range, method=None):
@@ -78,15 +85,49 @@ class RelayHandler(BaseHTTPRequestHandler):
         finally:
             connection.close()
 
-    def forward_large(self, endpoint, header, path, start, end):
+    def file_size(self, endpoint, header, path):
         connection, info = self.upstream(endpoint, header, path, "", "HEAD")
         try:
             if info.status != 200:
                 self.send_error(info.status)
-                return
-            size = int(info.getheader("Content-Length"))
+                return None
+            return int(info.getheader("Content-Length"))
         finally:
             connection.close()
+
+    def forward_multiple(self, endpoint, header, path, ranges):
+        matches = [RANGE.fullmatch("bytes=" + part.strip()) for part in ranges.split(",")]
+        if len(matches) > 64 or not all(matches):
+            self.send_error(416)
+            return
+        size = self.file_size(endpoint, header, path)
+        if size is None:
+            return
+        spans = [(int(m[1]), min(size - 1, int(m[2]))) for m in matches]
+        lengths = [end - start + 1 for start, end in spans]
+        if min(lengths) <= 0 or sum(lengths) > 256 * 1024 * 1024:
+            self.send_error(416)
+            return
+        boundary = "remoteqgis-" + token_hex(8)
+        parts = [f"--{boundary}\r\nContent-Type: application/octet-stream\r\n"
+                 f"Content-Range: bytes {start}-{end}/{size}\r\n\r\n".encode("ascii")
+                 for start, end in spans]
+        closing = f"--{boundary}--\r\n".encode("ascii")
+        self.send_response(206)
+        self.send_header("Content-Type", f"multipart/byteranges; boundary={boundary}")
+        self.send_header("Content-Length", str(sum(lengths) + sum(len(part) + 2 for part in parts) + len(closing)))
+        self.end_headers()
+        for part, (start, end) in zip(parts, spans):
+            self.wfile.write(part)
+            if not self.copy_span(endpoint, header, path, start, end):
+                return
+            self.wfile.write(b"\r\n")
+        self.wfile.write(closing)
+
+    def forward_large(self, endpoint, header, path, start, end):
+        size = self.file_size(endpoint, header, path)
+        if size is None:
+            return
         end = min(end, size - 1)
         if start > end or end - start + 1 > 256 * 1024 * 1024:
             self.send_error(416)
@@ -96,15 +137,19 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
+        self.copy_span(endpoint, header, path, start, end)
+
+    def copy_span(self, endpoint, header, path, start, end):
         for offset in range(start, end + 1, CHUNK):
             connection, response = self.upstream(endpoint, header, path,
                                                 f"bytes={offset}-{min(end, offset + CHUNK - 1)}")
             try:
                 if response.status != 206:
-                    break
+                    return False
                 self.copy(response)
             finally:
                 connection.close()
+        return True
 
     def copy(self, response):
         while True:
@@ -131,7 +176,7 @@ class RasterSources:
 
     def layer(self, descriptor, manifest):
         if self.server is None:
-            self.server = ThreadingHTTPServer(("127.0.0.1", 0), RelayHandler)
+            self.server = RasterRelay(("127.0.0.1", 0), RelayHandler)
             self.server.relay = self
             Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
                    name="RemoteQGIS raster loopback").start()

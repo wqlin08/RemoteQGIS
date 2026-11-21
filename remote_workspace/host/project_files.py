@@ -6,6 +6,7 @@ from zipfile import BadZipFile, ZipFile
 
 from qgis.core import QgsProviderRegistry, QgsVectorLayer
 
+from ..common.online import online_uri
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 
 
@@ -90,6 +91,9 @@ class ProjectFiles:
             raise WorkspaceError("含有 Python 宏的项目须在工作站本地打开。")
         for layer in project.findall("./projectlayers/maplayer"):
             provider, source = layer.findtext("provider"), layer.findtext("datasource")
+            if provider == "wms":
+                online_uri(source)
+                continue
             uri = QgsProviderRegistry.instance().decodeUri(provider or "", source or "") \
                 if provider in ("ogr", "gdal") else {}
             if not uri.get("path"):

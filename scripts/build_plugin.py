@@ -27,6 +27,9 @@ def package_files():
     for name in ("LICENSE", "README.md", "CHANGELOG.md"):
         yield f"remote_workspace/{name}", (ROOT / name).read_bytes()
 
+    for page in sorted((ROOT / "docs").glob("*.md")):
+        yield f"remote_workspace/docs/{page.name}", page.read_bytes()
+
     cache = ROOT / "build" / "tornado-6.5.10.tar.gz"
     dependency = cache.read_bytes() if cache.exists() else b""
     if sha256(dependency).hexdigest() != TORNADO_SHA256:

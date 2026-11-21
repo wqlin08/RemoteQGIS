@@ -9,9 +9,11 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QTimer, QVariant
 
 from .rasters import RasterTiles
+from .online import OnlineLayers
 from .raster_sources import RasterSources
 from .edits import ClientEdits
 from ..common.edits import IDENTITY
+from ..common.online import ONLINE_PROPERTY
 from ..common.layers import apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_tree
 from ..common.vector import field_data, fields_from, geometry_from, unpack
 
@@ -49,13 +51,14 @@ def vector_proxy(name: str, document: dict):
 
 
 class Proxies:
-    def __init__(self, connection, iface, changed, failure):
+    def __init__(self, connection, iface, changed, failure, rejected):
         self.connection, self.iface = connection, iface
         self.canvas = canvas = iface.mapCanvas()
         self.changed, self.failure = changed, failure
         self.tiles = RasterTiles(connection, canvas, failure)
         self.raw_rasters = RasterSources(connection)
         self.edits = ClientEdits(self)
+        self.online = OnlineLayers(self, rejected)
         self.project = QgsProject.instance()
         self.layers, self.descriptors = {}, {}
         self.pending = set()
@@ -146,7 +149,8 @@ class Proxies:
             if identifier not in self.descriptors or not self.project.mapLayer(local):
                 self.edits.detach(identifier)
                 self.layers.pop(identifier)
-                self.project.removeMapLayer(local)
+                if not self.online.release(identifier):
+                    self.project.removeMapLayer(local)
         for identifier, descriptor in self.descriptors.items():
             if identifier in self.layers:
                 layer = self.project.mapLayer(self.layers[identifier])
@@ -162,7 +166,15 @@ class Proxies:
                         and identifier not in self.pending and identifier not in self.edits.in_flight):
                     self._request_vector(identifier)
             elif identifier not in self.pending:
-                if descriptor.get("source_version"):
+                if descriptor["kind"] == "online":
+                    try:
+                        layer = self.online.layer(descriptor)
+                        self._add(identifier, layer)
+                        layer.setCustomProperty(ONLINE_PROPERTY, True)
+                    except ValueError as exc:
+                        self._unavailable.add(identifier)
+                        self.failure(str(exc))
+                elif descriptor.get("source_version"):
                     self._request_raster(identifier)
                 elif descriptor["kind"] == "raster":
                     try:
@@ -328,7 +340,8 @@ class Proxies:
         self._unavailable.discard(identifier)
         layer.setCustomProperty("remoteqgis/id", identifier)
         self._style(layer, self.descriptors[identifier])
-        self.project.addMapLayer(layer, False)
+        if self.project.mapLayer(layer.id()) is None:
+            self.project.addMapLayer(layer, False)
         self.layers[identifier] = layer.id()
 
     def _local_layers(self):
@@ -337,7 +350,7 @@ class Proxies:
 
     def _layout(self):
         layers = self._local_layers()
-        if not layers and not self.tree and self.group is None:
+        if not self.session and not layers and not self.tree and self.group is None:
             return
         if self.group is None:
             self.group = self.project.layerTreeRoot().insertGroup(0, "RemoteQGIS")
@@ -363,6 +376,7 @@ class Proxies:
         return tree, settings
 
     def _sync_local(self):
+        self.online.inspect()
         if (not self.connection.ready or self._sending or self._loading or self.pending
                 or self._baseline is None or self.revision < 0 or self._unavailable):
             return
@@ -430,7 +444,9 @@ class Proxies:
         self._zoom_import.stop()
         for key in tuple(self.edits.records):
             self.edits.detach(key)
-        self.project.removeMapLayers(list(self.layers.values()))
+        managed = [local for key, local in self.layers.items() if not self.online.release(key)]
+        self.online.clear()
+        self.project.removeMapLayers(managed)
         if self.group is not None:
             try:
                 if self.group.parent():
@@ -454,6 +470,7 @@ class Proxies:
         for key in tuple(self.edits.records):
             self.edits.detach(key)
         self.layers.clear()
+        self.online.clear()
         self.revision = -1
         self._view.stop()
         self._import_focus.clear()

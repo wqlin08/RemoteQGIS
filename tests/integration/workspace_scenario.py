@@ -303,8 +303,15 @@ class Scenario:
             self.step = 211
             if hasattr(self.panel, "_toolbox"):
                 self._run_analysis()
-            self.step = 22
-            self.connection.call("project", {"action": "save"}, self._final_save)
+            if hasattr(proxies, "online"):
+                self._prepare_online()
+            else:
+                self.step = 22
+                self.connection.call("project", {"action": "save"}, self._final_save)
+        if self.step == 210:
+            self._prepare_online()
+        if self.step in (212, 213, 214):
+            self._online_step()
         return self.step == 24
 
     def _run_analysis(self):
@@ -338,6 +345,72 @@ class Scenario:
         assert ds.RasterXSize < 4096 and ds.RasterCount == 3
         ds = None
         self.mark("processing-verified")
+
+    def _prepare_online(self):
+        proxies = self.browser.proxies
+        project = proxies.project
+        if hasattr(self.panel, "_toolbox"):
+            outputs = {"测试数据/计算.tif", "测试数据/裁剪.tif", "测试数据/缓冲.gpkg"}
+            loaded = {desc.get("path"): proxies.layers[key] for key, desc in proxies.descriptors.items()
+                      if key in proxies.layers and desc.get("path") in outputs}
+            if loaded.keys() != outputs:
+                self.step = 210
+                return
+            # Exercise online drawing separately from simultaneous full raster-calculation previews.
+            for path in outputs - {"测试数据/缓冲.gpkg"}:
+                proxies.group.findLayer(loaded[path]).setItemVisibilityChecked(False)
+        self.local_test = QgsVectorLayer("Point?crs=EPSG:4326", "本地拒绝测试", "memory")
+        source = "type=xyz&url=https://example.invalid/remoteqgis-fixture/{z}/{x}/{y}.png&zmin=0&zmax=19"
+        self.online_test = QgsRasterLayer(source, "在线测试瓦片", "wms")
+        assert self.online_test.isValid()
+        project.addMapLayer(self.local_test)
+        project.addMapLayer(self.online_test)
+        self.step = 212
+
+    def _online_step(self):
+        proxies = self.browser.proxies
+        root = proxies.project.layerTreeRoot()
+        if self.step == 212:
+            keys = {self.local_test.id(), self.online_test.id()}
+            if not keys <= proxies.online.positions.keys():
+                return
+            assert not any(desc["kind"] == "online" for desc in proxies.descriptors.values())
+            self._drop_on_group(root.findLayer(self.local_test.id()))
+            self.step = 213
+        if self.step == 213:
+            restored = root.findLayer(self.local_test.id())
+            if restored.parent() == proxies.group:
+                return
+            warning = self.browser._layer_warning
+            assert warning is not None and "本地数据" in warning.text(), self.browser.message.text()
+            warning.accept()
+            self._drop_on_group(root.findLayer(self.online_test.id()))
+            self.mark("online-dragged")
+            self.step = 214
+        if self.step == 214 and (self.root / "online-host-verified").exists():
+            handles = [key for key, desc in proxies.descriptors.items() if desc["kind"] == "online"]
+            if not handles:
+                return
+            key, = handles
+            assert proxies.layers[key] == self.online_test.id()
+            canvas = self.panel.iface.mapCanvas()
+            color = canvas_center_color(canvas)
+            if color is None or color.name() != "#2468ac":
+                self._online_checks = getattr(self, "_online_checks", 0) + 1
+                assert self._online_checks < 80, (color, canvas.extent(),
+                                                   [layer.name() for layer in canvas.layers()],
+                                                   self.browser.message.text())
+                return
+            self.mark("online-client-verified")
+            self.step = 22
+            self.connection.call("project", {"action": "save"}, self._final_save)
+
+    def _drop_on_group(self, node):
+        identifier = node.layerId()
+        self.browser.proxies.group.insertChildNode(0, node.clone())
+        node.parent().removeChildNode(node)
+        actual = self.browser.proxies.project.layerTreeRoot().findLayer(identifier)
+        assert actual is not None and actual.parent() == self.browser.proxies.group
 
     def _draw_polygon(self, layer):
         self.step = 191

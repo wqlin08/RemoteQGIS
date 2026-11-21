@@ -5,17 +5,49 @@
 import argparse
 from contextlib import ExitStack
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import secrets
 import socket
+import struct
 import subprocess
+from threading import Thread
+import zlib
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def fixture_png():
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    pixels = (bytes([0]) + bytes([36, 104, 172]) * 256) * 256
+    return (bytes.fromhex("89504e470d0a1a0a") +
+            chunk(b"IHDR", struct.pack(">IIBBBBB", 256, 256, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+
+
+class FixtureTiles(BaseHTTPRequestHandler):
+    image = fixture_png()
+
+    def log_message(self, *_):
+        pass
+
+    def do_GET(self):
+        if not self.path.startswith("/remoteqgis-fixture/"):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(self.image)))
+        self.end_headers()
+        self.wfile.write(self.image)
 
 
 def expect_http(port: int, path: str, expected: int, headers=None):
@@ -66,12 +98,15 @@ def main():
         unresponsive.bind(("127.0.0.1", 0))
         unresponsive.listen(8)
         timeout_port = unresponsive.getsockname()[1]
+        tiles = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), FixtureTiles))
+        Thread(target=tiles.serve_forever, daemon=True).start()
+        stack.callback(tiles.shutdown)
         port_socket = socket.socket()
         with port_socket:
             port_socket.bind(("127.0.0.1", 0))
             port = port_socket.getsockname()[1]
         token = secrets.token_urlsafe(32)
-        settings = {"port": port, "timeout_port": timeout_port, "token": token, "version": args.stage}
+        settings = {"port": port, "timeout_port": timeout_port, "token": token, "version": args.stage, "tiles": tiles.server_port}
         (root / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
         (root / "shared").mkdir()
         with ZipFile(args.zip) as archive:

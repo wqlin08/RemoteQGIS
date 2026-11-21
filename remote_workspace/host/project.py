@@ -13,7 +13,8 @@ from qgis.core import (
     QgsProviderRegistry, QgsWkbTypes,
 )
 
-from ..common.layers import apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_settings, validate_tree
+from ..common.layers import GROUP_ID, apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_settings, validate_tree
+from ..common.online import ONLINE_PROPERTY, online_uri, source_from_layer
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 from .files import SharedFiles
 from .vectors import VectorEdits, digest, snapshot
@@ -49,6 +50,7 @@ class HostWorkspace:
             "create_vector": self.edits.create, "edit": self.edits.commit,
             "processing_catalog": self.processing.catalog, "processing_start": self.processing.start,
             "processing_status": self.processing.status, "processing_cancel": self.processing.cancel,
+            "online_add": self.online_add, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
         }
         handler = operations.get(operation)
         if handler is None:
@@ -124,6 +126,32 @@ class HostWorkspace:
         self.project.addMapLayers(layers)
         return dict(self.state({}), imported=[layer.id() for layer in layers])
 
+    def online_add(self, data):
+        uri = online_uri(data.get("source"))
+        name, position, visible = data.get("name"), data.get("position"), data.get("visible")
+        if not isinstance(name, str) or not 1 <= len(name) <= 512 or type(position) is not int or type(visible) is not bool:
+            raise WorkspaceError("在线图层的名称或位置无效。")
+        root = self.project.layerTreeRoot()
+        parent = root
+        group = data.get("group")
+        if group:
+            parent = next((node for node in root.findGroups(True)
+                           if node.customProperty(GROUP_ID, "") == group), root)
+        layer = next((layer for layer in self.project.mapLayers().values()
+                      if layer.providerType() == "wms" and layer.source() == uri), None)
+        if layer is None:
+            layer = QgsRasterLayer(uri, name, "wms")
+            if not layer.isValid():
+                raise WorkspaceError("工作站无法打开该在线图层。", 422)
+            self.project.addMapLayer(layer, False)
+        layer.setCustomProperty(ONLINE_PROPERTY, True)
+        node = root.findLayer(layer.id())
+        if node is None:
+            node = parent.insertLayer(min(max(0, position), len(parent.children())), layer)
+        node.setItemVisibilityChecked(visible)
+        self.project.setDirty(True)
+        return dict(self.state({}), imported=[layer.id()])
+
     def source(self, layer):
         if layer.providerType() not in ("ogr", "gdal"):
             return None
@@ -152,6 +180,13 @@ class HostWorkspace:
         return layer
 
     def describe(self, layer):
+        if layer.customProperty(ONLINE_PROPERTY, False):
+            try:
+                uri = source_from_layer(layer)
+            except WorkspaceError:
+                return None
+            return {"id": layer.id(), "name": layer.name(), "kind": "online", "online_source": uri,
+                    "visible": True, "opacity": opacity(layer), "style": "", "properties": read_properties(layer)}
         source = self.source(layer)
         if source is None:
             return None
@@ -201,7 +236,7 @@ class HostWorkspace:
             "nodata": layer.customProperty("remoteqgis/nodata", None),
         }
         spec["crs"] = layer.crs().toWkt()
-        spec["source_version"] = sha256(repr((spec["path"], spec["stamp"], spec["crs"])).encode()).hexdigest()[:24]
+        spec["source_version"] = sha256(repr((spec["path"], spec["stamp"][:3], spec["crs"])).encode()).hexdigest()[:24]
         spec["version"] = sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:24]
         return spec
 
@@ -327,8 +362,6 @@ class HostWorkspace:
     def refresh(self):
         rasters, descriptors = {}, {}
         for layer in self.project.mapLayers().values():
-            if self.source(layer) is None:
-                continue
             try:
                 desc = self.describe(layer)
                 if desc and desc["kind"] == "raster":

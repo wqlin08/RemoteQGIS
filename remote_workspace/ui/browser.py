@@ -53,6 +53,7 @@ class Browser(QWidget):
         self.connection = connection
         self.iface = iface
         self.directory = ""
+        self._layer_warning = None
         self.message = QLabel("连接工作站后可浏览共享目录。")
         self.message.setWordWrap(True)
         self.message.setTextFormat(Qt.PlainText)
@@ -67,7 +68,7 @@ class Browser(QWidget):
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setDragEnabled(True)
         self.tree.itemDoubleClicked.connect(self._open)
-        self.proxies = Proxies(connection, iface, self._refresh_layers, self.show_error)
+        self.proxies = Proxies(connection, iface, self._refresh_layers, self.show_error, self.reject_layer)
         self.vector_actions = VectorActions(self)
         self.drop_handler = RemoteDropHandler(self)
         iface.registerCustomDropHandler(self.drop_handler)
@@ -129,6 +130,20 @@ class Browser(QWidget):
 
     def show_error(self, message):
         self.message.setText(message)
+
+    def reject_layer(self, message):
+        self.show_error(message)
+        if self._layer_warning is not None:
+            self._layer_warning.setText(message)
+            return
+        warning = QMessageBox(QMessageBox.Warning, "图层未同步", message, QMessageBox.Ok, self)
+        self._layer_warning = warning
+        warning.finished.connect(self._dismiss_layer_warning)
+        warning.open()
+
+    def _dismiss_layer_warning(self, _result):
+        self._layer_warning.deleteLater()
+        self._layer_warning = None
 
     def _refresh_layers(self):
         project = self.proxies.remote_project

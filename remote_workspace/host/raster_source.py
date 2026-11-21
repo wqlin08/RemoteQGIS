@@ -31,7 +31,7 @@ def raster_manifest(path, stamp, assigned_crs):
     # GDAL writes source filenames, but other free-form metadata may name local files.
     for parent in root.iter():
         for child in list(parent):
-            if child.tag in ("Metadata", "Description"):
+            if child.tag == "Metadata" or child.tag == "Description" and parent.tag != "VRTRasterBand":
                 parent.remove(child)
     return {"vrt": ElementTree.tostring(root, encoding="unicode")}
 
@@ -39,7 +39,7 @@ def raster_manifest(path, stamp, assigned_crs):
 def read_range(spec, member, requested, head):
     path = Path(spec["path"] + member[len("source.tif"):])
     try:
-        if path.is_symlink() or path.resolve() != path or file_stamp(spec["path"]) != spec["stamp"]:
+        if path.is_symlink() or path.resolve() != path or file_stamp(spec["path"])[:3] != spec["stamp"][:3]:
             raise WorkspaceError("栅格文件已经修改，请刷新工作区。", 409)
         with path.open("rb") as file:
             size = file.seek(0, 2)

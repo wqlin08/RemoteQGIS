@@ -195,7 +195,6 @@ class RemoteProcessing:
             raise WorkspaceError("工作站找不到该任务。", 404)
         if job["state"] not in TERMINAL:
             job["progress"] = job["task"].progress()
-            job["log"] = job["feedback"].textLog()[-8000:]
         return {name: job[name] for name in ("state", "progress", "result", "log", "reason")}
 
     def cancel(self, data):
