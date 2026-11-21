@@ -20,9 +20,10 @@ class ServiceStatus:
 class HostService:
     """Own the network loop. The QGIS thread publishes immutable snapshots."""
 
-    def __init__(self, config: HostConfig, info: HostInfo, dispatcher):
+    def __init__(self, config: HostConfig, info: HostInfo, dispatcher, *, viewer_token=""):
         self.config = config
         self.dispatcher = dispatcher
+        self._viewer_token = viewer_token
         self._info = (info, 0, {})
         self._lock = threading.Lock()
         self._status = ServiceStatus("starting")
@@ -75,7 +76,7 @@ class HostService:
         with self._lock:
             if self._status.state == "stopping":
                 return
-            api = HostAPI(self.config.token, self._info, self.dispatcher)
+            api = HostAPI(self.config.token, self._info, self.dispatcher, viewer_token=self._viewer_token)
             self._loop = asyncio.get_running_loop()
             self._stop_signal = asyncio.Event()
             self._publish = api.publish

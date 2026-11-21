@@ -22,7 +22,9 @@ class Authenticated:
     def prepare(self):
         if "Origin" in self.request.headers:
             raise HTTPError(403)
-        if not authorized(self.request.headers.get("Authorization", ""), self.api.token):
+        header = self.request.headers.get("Authorization", "")
+        self.viewer = bool(self.api.viewer_token and authorized(header, self.api.viewer_token))
+        if not self.viewer and not authorized(header, self.api.token):
             raise HTTPError(401)
 
     def write_error(self, status_code: int, **kwargs):
@@ -61,6 +63,8 @@ class WorkspaceHandler(Authenticated, RequestHandler):
                 raise ValueError
         except (ValueError, TypeError, KeyError, RecursionError):
             raise HTTPError(400, reason="请求结构无效。")
+        if self.viewer and operation not in {"state", "vector", "raster_source", "pixel", "view_state"}:
+            raise HTTPError(403, reason="展示连接仅有读取权限。")
         try:
             result = await self.api.call(operation, arguments)
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -125,8 +129,9 @@ class RasterSourceHandler(Authenticated, RequestHandler):
 
 
 class HostAPI:
-    def __init__(self, token: str, state: tuple, dispatcher):
+    def __init__(self, token: str, state: tuple, dispatcher, *, viewer_token=""):
         self.token = token
+        self.viewer_token = viewer_token
         self.state = state
         self.dispatcher = dispatcher
         self._raster_workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="RemoteQGIS raster")

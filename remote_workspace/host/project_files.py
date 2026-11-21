@@ -6,13 +6,15 @@ from zipfile import BadZipFile, ZipFile
 
 from qgis.core import QgsProviderRegistry, QgsVectorLayer
 
+from .view import DesktopView
 from ..common.online import online_uri
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 
 
 class ProjectFiles:
-    def __init__(self, files, project, canvas):
-        self.files, self.project, self.canvas = files, project, canvas
+    def __init__(self, files, project, canvas=None, *, view_adapter=None):
+        self.files, self.project = files, project
+        self.view = DesktopView(canvas) if view_adapter is None else view_adapter
 
     def __call__(self, data):
         action = data.get("action")
@@ -25,6 +27,7 @@ class ProjectFiles:
 
         if action == "close":
             self.project.clear()
+            self.view.cleared()
             return {}
         if action == "save":
             if not self.project.fileName():
@@ -43,24 +46,17 @@ class ProjectFiles:
             self.validate_sources(path)
             if not self.project.read(str(path)):
                 raise WorkspaceError("无法打开工作站项目。", 422)
-            extent = self.project.viewSettings().defaultViewExtent()
-            if not extent.isEmpty():
-                self.canvas.setExtent(extent)
-            self.canvas.refresh()
+            self.view.opened(self.project)
         else:
             if action == "create":
                 self.project.clear()
-            self.project.viewSettings().setDefaultViewExtent(self.default_extent())
+                self.view.cleared()
+            self.view.save(self.project)
             old_path = self.project.fileName()
             if not self.project.write(str(path)):
                 self.project.setFileName(old_path)
                 raise WorkspaceError("无法写入工作站项目。", 409)
         return {}
-
-    def default_extent(self):
-        from qgis.core import QgsReferencedRectangle
-
-        return QgsReferencedRectangle(self.canvas.extent(), self.canvas.mapSettings().destinationCrs())
 
     def path(self, relative, exists):
         path = self.files.path(relative, exists=exists)

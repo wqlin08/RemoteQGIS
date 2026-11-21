@@ -20,6 +20,7 @@ from .files import SharedFiles
 from .vectors import VectorEdits, digest, snapshot
 from .rasters import RESAMPLING, file_stamp
 from .project_files import ProjectFiles
+from .view import DesktopView
 from .processing import RemoteProcessing
 
 
@@ -29,15 +30,15 @@ def bounds(rectangle):
 
 
 class HostWorkspace:
-    def __init__(self, root: Path, canvas):
+    def __init__(self, root: Path, canvas=None, *, view_adapter=None):
         self.files = SharedFiles(root)
         self.project = QgsProject.instance()
-        self.canvas = canvas
+        self.view_adapter = DesktopView(canvas) if view_adapter is None else view_adapter
         self.revision = 0
         self.session = uuid4().hex
         self._history = {}
         self._document = None
-        self.project_files = ProjectFiles(self.files, self.project, canvas)
+        self.project_files = ProjectFiles(self.files, self.project, view_adapter=self.view_adapter)
         self.edits = VectorEdits(self)
         self.processing = RemoteProcessing(self)
         self.rasters = {}
@@ -287,11 +288,11 @@ class HostWorkspace:
         return {}
 
     def current_view(self):
-        settings = self.canvas.mapSettings()
+        adapter = self.view_adapter
+        crs, scale = adapter.crs(), adapter.scale()
         return {
-            "crs": settings.destinationCrs().authid() or settings.destinationCrs().toWkt(),
-            "extent": bounds(self.canvas.extent()), "rotation": self.canvas.rotation(),
-            "scale": self.canvas.scale() if math.isfinite(self.canvas.scale()) else None,
+            "crs": crs.authid() or crs.toWkt(), "extent": bounds(adapter.extent()),
+            "rotation": adapter.rotation(), "scale": scale if scale is not None and math.isfinite(scale) else None,
         }
 
     def view(self, data):
@@ -306,15 +307,16 @@ class HostWorkspace:
         source = QgsCoordinateReferenceSystem()
         if not source.createFromUserInput(crs):
             raise WorkspaceError("地图坐标系无效。")
-        destination = self.canvas.mapSettings().destinationCrs()
+        destination = self.view_adapter.crs()
         try:
             transform = QgsCoordinateTransform(source, destination, self.project)
             rectangle = transform.transformBoundingBox(QgsRectangle(*values))
         except Exception as exc:
             raise WorkspaceError("工作站无法转换地图视野。") from exc
-        self.canvas.setExtent(rectangle)
-        self.canvas.setRotation(angle % 360)
-        self.canvas.refresh()
+        scale = data.get("scale")
+        if type(scale) not in (int, float) or not math.isfinite(scale) or scale <= 0:
+            scale = None
+        self.view_adapter.apply(rectangle, angle % 360, scale)
         return {}
 
     def layout(self, data):
