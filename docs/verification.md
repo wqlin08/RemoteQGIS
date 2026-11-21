@@ -25,3 +25,18 @@ python3 scripts/test_desktop.py --stage 5 --qgis /Applications/QGIS-LTR.app/Cont
 ```
 
 集成测试使用临时 QGIS 用户配置、测试令牌和自动生成的数据。两个 QGIS Desktop 实例通过应用自身的 ZIP 插件安装器启动插件。测试使用 macOS 默认窗口后端。
+
+## 1.1.0-rc1 后台 Host 和管理程序
+
+macOS 实测使用 QGIS 3.40.4。客户端和展示分别运行在隔离的 QGIS Desktop 配置中，后台计算使用单独的 PyQGIS 配置。测试数据和项目保存在临时目录。
+
+| 测试 | 已验证行为 |
+| --- | --- |
+| 现有 Desktop Host | 原有阶段 5 场景，包括鉴权、超时、心跳、重连、GeoTIFF 样式、矢量事务及恢复、Processing 和在线图层。 |
+| 独立 PyQGIS | TIFF、GeoPackage 和项目读写，Native 与 GDAL Provider 初始化，Qt 后台任务完成回调。 |
+| Headless Host | 原始像元与 TIFF Range 字节核对，GeoPackage 修改和同事务重试，保存及重开带旋转的项目，42 项算法注册，Native Buffer 和 GDAL Translate 输出。 |
+| Host Manager | 从签名后的本地应用包启动管理窗口，启动及停止后台进程，后台进程异常退出后重新启动并恢复项目，退出时释放端口。 |
+| 客户端与展示 | 从 ZIP 安装的 QGIS 客户端使用已保存的工作站按需启动后台 Host，原生加载栅格与矢量代理。独立 QGIS Desktop 展示加载两层并应用 12° 旋转。读取令牌的写入请求返回 403。原生 macOS 钥匙串完成令牌的写入、读取、更新和删除。 |
+| 包体 | 校验 macOS 应用包签名结构和 LaunchAgent plist，交叉编译并静态校验 Windows x64 GUI 可执行文件、启动入口和随包依赖。 |
+
+Windows 工作站运行、任务计划程序的实际注册及重启恢复需要实机验收。macOS LaunchAgent 已检查生成配置，尚未执行实际注销或重启。两个平台的自动启动均以配置用户登录为触发条件。

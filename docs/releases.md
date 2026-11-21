@@ -17,3 +17,6 @@ git worktree add --detach ../RemoteQGIS-v0.5.1 v0.5.1
 ```
 
 正式发布需在 Windows 工作站和 macOS 客户端完成跨网验收，覆盖真实遥感影像的原始波段访问、工作站 GDAL 算法及在线服务可达性。
+
+
+候选版 `1.1.0-rc1` 的 Host Manager 和客户端 ZIP 独立构建。需要恢复原有双端 Desktop 流程时，先保存并退出后台 Host，随后在两端重新安装 `RemoteQGIS-1.0.0-rc1.zip` 并继续手动连接。原版对应提交为 `0b05130934d33a8e376bd919afa6df81ccad1e81`。候选 Host Manager 的系统启动项可在管理窗口取消，工作站数据和 QGIS 用户配置由各自程序管理。
