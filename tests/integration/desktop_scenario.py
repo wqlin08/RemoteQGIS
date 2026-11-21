@@ -49,6 +49,8 @@ def setup():
     global panel, scenario
     plugin_installer().installFromZipFile(os.environ["REMOTEQGIS_TEST_ZIP"])
     assert utils.isPluginLoaded(key), "QGIS could not install and start the ZIP"
+    from processing.core.Processing import Processing
+    Processing.initialize()
     plugin = utils.plugins[key]
     plugin._action.trigger()
     panel = plugin._panel

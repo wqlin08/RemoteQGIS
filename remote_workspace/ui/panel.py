@@ -8,6 +8,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..client.connection import Connection, endpoint
+from ..client.processing import RemoteToolbox
 from ..common.protocol import HostInfo, new_token
 from ..host.config import HostConfig
 from ..host.dispatch import Dispatcher
@@ -44,6 +45,7 @@ class WorkspacePanel(QDockWidget):
         self._client_state = "idle"
         self._last_info = None
         self._connection = Connection(self)
+        self._toolbox = RemoteToolbox(self._connection)
         self._connection.status_changed.connect(self._client_status)
         self._connection.info_changed.connect(self._show_host_info)
         self._connection.latency_changed.connect(self._show_latency)
@@ -162,6 +164,7 @@ class WorkspacePanel(QDockWidget):
     def _stop_host(self):
         if self._host is not None:
             self._dispatcher.active = False
+            self._workspace.processing.close()
             self._host.stop()
             self._poll_host()
 
@@ -244,7 +247,9 @@ class WorkspacePanel(QDockWidget):
         self._host_timer.stop()
         if self._host is not None:
             self._dispatcher.active = False
+            self._workspace.processing.close()
             self._host.stop()
+        self._toolbox.close()
         self.browser.shutdown()
         self._connection.stop()
         self.host_token.clear()

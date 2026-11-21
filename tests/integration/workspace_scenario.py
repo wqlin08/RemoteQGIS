@@ -8,7 +8,7 @@ import numpy as np
 from osgeo import gdal, ogr, osr
 
 from qgis.core import (
-    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsField, QgsGeometry, QgsMimeDataUtils, QgsRasterLayer,
+    QgsApplication, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsField, QgsGeometry, QgsMimeDataUtils, QgsRasterLayer,
     QgsPalettedRasterRenderer, QgsRectangle, QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QPoint, Qt, QTimer, QVariant
@@ -300,9 +300,44 @@ class Scenario:
             self.mark("vector-verified")
             self.step = 21
         if self.step == 21 and (self.root / "vector-host-verified").exists():
+            self.step = 211
+            if hasattr(self.panel, "_toolbox"):
+                self._run_analysis()
             self.step = 22
             self.connection.call("project", {"action": "save"}, self._final_save)
         return self.step == 24
+
+    def _run_analysis(self):
+        from processing.core.Processing import Processing
+
+        registry = QgsApplication.processingRegistry()
+        provider = registry.providerById("remoteqgis")
+        assert len(provider.algorithms()) >= 35
+        layers = self.browser.proxies._local_layers()
+        vector = layers[self.gpkg]
+        raster = layers[self.raster_id]
+        result = Processing.runAlgorithm("remoteqgis:native_buffer", {
+            "INPUT": vector.id(), "DISTANCE": 0.1, "REMOTE_OUTPUT": "测试数据/缓冲.gpkg",
+        })
+        assert result["REMOTE_OUTPUT"] == "测试数据/缓冲.gpkg", result
+        assert (self.root / "shared" / result["REMOTE_OUTPUT"]).is_file()
+        result = Processing.runAlgorithm("remoteqgis:native_rastercalc", {
+            "LAYERS": [raster.id()], "EXPRESSION": f'"{raster.name()}@2" + 5',
+            "REMOTE_OUTPUT": "测试数据/计算.tif",
+        })
+        assert result["REMOTE_OUTPUT"] == "测试数据/计算.tif", result
+        ds = gdal.Open(str(self.root / "shared" / result["REMOTE_OUTPUT"]))
+        assert ds.GetRasterBand(1).ReadAsArray(ds.RasterXSize // 2, ds.RasterYSize // 2, 1, 1).item() == 2005
+        ds = None
+        result = Processing.runAlgorithm("remoteqgis:gdal_cliprasterbyextent", {
+            "INPUT": raster.id(), "PROJWIN": "100,102,28,30 [EPSG:4326]",
+            "REMOTE_OUTPUT": "测试数据/裁剪.tif",
+        })
+        assert result["REMOTE_OUTPUT"] == "测试数据/裁剪.tif", result
+        ds = gdal.Open(str(self.root / "shared" / result["REMOTE_OUTPUT"]))
+        assert ds.RasterXSize < 4096 and ds.RasterCount == 3
+        ds = None
+        self.mark("processing-verified")
 
     def _draw_polygon(self, layer):
         self.step = 191

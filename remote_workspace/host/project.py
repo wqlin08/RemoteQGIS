@@ -19,6 +19,7 @@ from .files import SharedFiles
 from .vectors import VectorEdits, digest, snapshot
 from .rasters import RESAMPLING, file_stamp
 from .project_files import ProjectFiles
+from .processing import RemoteProcessing
 
 
 def bounds(rectangle):
@@ -37,6 +38,7 @@ class HostWorkspace:
         self._document = None
         self.project_files = ProjectFiles(self.files, self.project, canvas)
         self.edits = VectorEdits(self)
+        self.processing = RemoteProcessing(self)
         self.rasters = {}
 
     def execute(self, operation: str, data: dict):
@@ -45,6 +47,8 @@ class HostWorkspace:
             "vector": self.vector, "render": self.render, "project": self.project_files,
             "layout": self.layout, "view": self.view, "enable_edit": self.edits.enable,
             "create_vector": self.edits.create, "edit": self.edits.commit,
+            "processing_catalog": self.processing.catalog, "processing_start": self.processing.start,
+            "processing_status": self.processing.status, "processing_cancel": self.processing.cancel,
         }
         handler = operations.get(operation)
         if handler is None:
