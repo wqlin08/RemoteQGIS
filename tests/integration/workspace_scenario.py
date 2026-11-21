@@ -468,7 +468,17 @@ class Scenario:
 
     def _project_saved(self, _, error):
         assert not error, error
-        assert (self.root / "shared" / "测试数据" / "远程.qgz").exists()
+        path = self.root / "shared" / "测试数据" / "远程.qgz"
+        from zipfile import ZipFile
+        from xml.etree import ElementTree
+
+        with ZipFile(path) as archive:
+            document = ElementTree.fromstring(archive.read(next(name for name in archive.namelist()
+                                                                if name.endswith(".qgs"))))
+        extent = document.find("./mapcanvas/extent")
+        assert extent is not None
+        assert float(extent.findtext("xmin")) < float(extent.findtext("xmax"))
+        assert float(extent.findtext("ymin")) < float(extent.findtext("ymax"))
         self.connection.call("project", {"action": "close", "discard": True}, self._project_closed)
 
     def _project_closed(self, _, error):
