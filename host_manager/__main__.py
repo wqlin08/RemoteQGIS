@@ -42,7 +42,10 @@ def main():
         from .window import Window
 
         app = QApplication([])
-        app.setWindowIcon(QIcon(str(SOURCE / "remote_workspace/icons/logo.png")))
+        logo = Path(__file__).with_name("logo.png")
+        if not logo.is_file():
+            logo = SOURCE / "remote_workspace/icons/logo.png"
+        app.setWindowIcon(QIcon(str(logo)))
         window = Window(home, settings)
         window.show()
         if args.smoke_test_ui:
