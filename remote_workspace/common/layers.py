@@ -4,7 +4,7 @@ import math
 from uuid import uuid4
 from xml.etree import ElementTree
 
-from qgis.core import QgsFeatureRenderer, QgsLayerTreeGroup, QgsReadWriteContext, QgsVectorLayer
+from qgis.core import QgsFeatureRenderer, QgsLayerTreeGroup, QgsMapLayer, QgsRasterLayer, QgsReadWriteContext, QgsVectorLayer
 from qgis.PyQt.QtXml import QDomDocument
 
 from .workspace import WorkspaceError
@@ -12,6 +12,73 @@ from .workspace import WorkspaceError
 GROUP_ID = "remoteqgis/group"
 RENDERERS = {"singleSymbol", "categorizedSymbol", "graduatedSymbol", "RuleRenderer", "nullSymbol"}
 SYMBOL_LAYERS = {"SimpleMarker", "SimpleLine", "SimpleFill"}
+RASTER_RENDERERS = {"paletted", "singlebandgray", "singlebandpseudocolor", "multibandcolor",
+                    "singlebandcolordata", "hillshade", "contour"}
+RASTER_PROPERTIES = QgsMapLayer.Symbology | QgsMapLayer.Rendering | QgsMapLayer.Legend
+VECTOR_PROPERTIES = QgsMapLayer.Labeling | QgsMapLayer.Rendering | QgsMapLayer.Legend
+
+
+def canonical_xml(root):
+    for node in root.iter():
+        attributes = sorted(node.attrib.items())
+        node.attrib.clear()
+        node.attrib.update(attributes)
+        if node.text and not node.text.strip():
+            node.text = None
+        node.tail = None
+    return ElementTree.tostring(root, encoding="unicode")
+
+
+def properties_categories(layer):
+    if isinstance(layer, QgsRasterLayer):
+        return RASTER_PROPERTIES if layer.providerType() == "gdal" else QgsMapLayer.Rendering
+    return VECTOR_PROPERTIES
+
+
+def read_properties(layer):
+    doc = QDomDocument()
+    if layer.exportNamedStyle(doc, QgsReadWriteContext(), properties_categories(layer)):
+        return ""
+    root = ElementTree.fromstring(doc.toString())
+    for parent in root.iter():
+        for node in list(parent):
+            if node.tag in ("customproperties", "datasource", "providerSource", "editforminit", "attributeactions"):
+                parent.remove(node)
+    text = canonical_xml(root)
+    try:
+        validate_properties(text)
+    except WorkspaceError:
+        return ""
+    return text
+
+
+def validate_properties(text):
+    if not isinstance(text, str) or len(text) > 1024 * 1024 or "<!" in text:
+        raise WorkspaceError("图层属性文档过大或格式无效。")
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise WorkspaceError("图层属性 XML 无效。") from exc
+    if root.tag != "qgis" or any(node.tag in ("datasource", "providerSource", "editforminit",
+                                            "attributeactions", "customproperties", "layer")
+                                for node in root.iter()):
+        raise WorkspaceError("图层属性包含数据源或插件脚本。")
+    if any(item.get("type") not in RASTER_RENDERERS for item in root.iter("rasterrenderer")):
+        raise WorkspaceError("栅格渲染器类型不受支持。")
+
+
+def apply_properties(layer, text):
+    if not text or text == read_properties(layer):
+        return
+    validate_properties(text)
+    doc = QDomDocument()
+    if not doc.setContent(text)[0]:
+        raise WorkspaceError("无法解析图层属性。")
+    ok, message = layer.importNamedStyle(doc, properties_categories(layer))
+    if not ok:
+        raise WorkspaceError(message or "QGIS 无法应用图层属性。")
+    layer.triggerRepaint()
+
 
 
 def read_style(layer):
@@ -19,7 +86,7 @@ def read_style(layer):
         return ""
     doc = QDomDocument()
     doc.appendChild(layer.renderer().save(doc, QgsReadWriteContext()))
-    text = doc.toString()
+    text = canonical_xml(ElementTree.fromstring(doc.toString()))
     try:
         validate_style(text)
     except WorkspaceError:
@@ -171,3 +238,5 @@ def validate_settings(settings, known):
             raise WorkspaceError("图层名称或透明度无效。")
         if value.get("style"):
             validate_style(value["style"])
+        if value.get("properties"):
+            validate_properties(value["properties"])

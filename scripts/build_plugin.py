@@ -22,7 +22,7 @@ TORNADO_SHA256 = "a6b1ccd08c04b4a06fb5aeb381be99de5ad1e5375c1785e31d78c880feb576
 def package_files():
     source = ROOT / "remote_workspace"
     for file in sorted(source.rglob("*")):
-        if file.is_file() and file.suffix in (".py", ".txt") and "_vendor" not in file.parts:
+        if file.is_file() and file.suffix in (".py", ".txt", ".png") and "_vendor" not in file.parts:
             yield file.relative_to(ROOT).as_posix(), file.read_bytes()
     for name in ("LICENSE", "README.md", "CHANGELOG.md"):
         yield f"remote_workspace/{name}", (ROOT / name).read_bytes()

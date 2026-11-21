@@ -12,6 +12,7 @@ from tornado.websocket import WebSocketClosedError, WebSocketHandler
 from ..common.protocol import EVENTS_PATH, INFO_PATH, MAX_MESSAGE_BYTES, authorized
 from ..common.workspace import API, MAX_DOCUMENT, TILES, WorkspaceError
 from .rasters import MAX_ZOOM, render, sample
+from .raster_source import MEMBER, SOURCE, raster_manifest, read_range
 
 
 class Authenticated:
@@ -100,6 +101,29 @@ class TileHandler(Authenticated, RequestHandler):
         self.finish(image)
 
 
+class RasterSourceHandler(Authenticated, RequestHandler):
+    async def head(self, identifier, version, member):
+        await self.respond(identifier, version, member, True)
+
+    async def get(self, identifier, version, member):
+        await self.respond(identifier, version, member, False)
+
+    async def respond(self, identifier, version, member, head):
+        spec = self.api.state[2].get(identifier)
+        if not spec or spec["source_version"] != version:
+            raise HTTPError(404)
+        try:
+            status, headers, data = await self.api.tile_job(
+                read_range, spec, member, self.request.headers.get("Range", ""), head
+            )
+        except WorkspaceError as exc:
+            raise HTTPError(exc.status, reason=str(exc))
+        self.set_status(status)
+        for name, value in headers.items():
+            self.set_header(name, value)
+        self.finish(data)
+
+
 class HostAPI:
     def __init__(self, token: str, state: tuple, dispatcher):
         self.token = token
@@ -113,6 +137,7 @@ class HostAPI:
                 (INFO_PATH, InfoHandler, {"api": self}),
                 (EVENTS_PATH, EventsHandler, {"api": self}),
                 (API, WorkspaceHandler, {"api": self}),
+                (SOURCE + rf"/([A-Za-z0-9_]+)/([0-9a-f]{{24}})/({MEMBER})", RasterSourceHandler, {"api": self}),
                 (TILES + r"/([A-Za-z0-9_]+)/([0-9a-f]{24})/(\d{1,2})/(\d{1,8})/(\d{1,8})\.png",
                  TileHandler, {"api": self}),
             ],
@@ -129,11 +154,13 @@ class HostAPI:
         return await asyncio.get_running_loop().run_in_executor(self._raster_workers, function, *args)
 
     async def call(self, operation: str, arguments: dict):
-        if operation == "pixel":
+        if operation in ("pixel", "raster_source"):
             key = arguments.get("id")
             spec = self.state[2].get(key) if isinstance(key, str) else None
             if spec is None:
                 raise WorkspaceError("影像不存在。", 404)
+            if operation == "raster_source":
+                return await self.tile_job(raster_manifest, spec["path"], spec["stamp"], spec["crs"])
             return await self.tile_job(sample, spec, arguments.get("x"), arguments.get("y"))
         future = self.dispatcher.submit(operation, arguments)
         return await asyncio.wait_for(asyncio.wrap_future(future), 40)

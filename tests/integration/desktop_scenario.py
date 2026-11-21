@@ -99,6 +99,14 @@ def host_tick():
         assert len(project.mapLayers()) == 3
         assert all(str(root / "shared") in layer.source() for layer in project.mapLayers().values())
         mark("workspace-host-verified")
+    if stage == 4 and not (root / "raster-style-host-verified").exists():
+        from qgis.core import QgsPalettedRasterRenderer, QgsRasterLayer
+
+        for raster in project.mapLayers().values():
+            if isinstance(raster, QgsRasterLayer) and isinstance(raster.renderer(), QgsPalettedRasterRenderer):
+                classes = raster.renderer().classes()
+                if any(item.value == 2000 and item.color.name() == "#d02c4f" for item in classes):
+                    mark("raster-style-host-verified")
     if stage == 4 and version >= 4 and not (root / "project-layout-verified").exists():
         layers = [layer for layer in project.mapLayers().values() if layer.name() == "远程点样式"]
         if layers and abs(panel.iface.mapCanvas().rotation() - 12) < 0.1:

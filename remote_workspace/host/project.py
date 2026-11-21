@@ -13,7 +13,7 @@ from qgis.core import (
     QgsProviderRegistry, QgsWkbTypes,
 )
 
-from ..common.layers import apply_style, apply_tree, opacity, read_style, read_tree, set_opacity, validate_settings, validate_tree
+from ..common.layers import apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_settings, validate_tree
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 from .files import SharedFiles
 from .vectors import VectorEdits, digest, snapshot
@@ -44,7 +44,7 @@ class HostWorkspace:
             "files": self.list_files, "import": self.import_files, "state": self.state,
             "vector": self.vector, "render": self.render, "project": self.project_files,
             "layout": self.layout, "view": self.view, "enable_edit": self.edits.enable,
-            "create_vector": self.edits.create, "edit": self.edits.commit, "mkdir": self.mkdir, "rename": self.rename, "delete": self.delete,
+            "create_vector": self.edits.create, "edit": self.edits.commit,
         }
         handler = operations.get(operation)
         if handler is None:
@@ -159,7 +159,7 @@ class HostWorkspace:
             "path": self.files.relative(path), "table": table or "", "crs": layer.crs().authid(),
             "wkt": layer.crs().toWkt(), "bounds": bounds(layer.extent()),
             "visible": node.itemVisibilityChecked() if node else True,
-            "opacity": opacity(layer), "style": read_style(layer),
+            "opacity": opacity(layer), "style": read_style(layer), "properties": read_properties(layer),
             "bands": layer.bandCount() if raster else 0,
             "geometry": "" if raster else QgsWkbTypes.displayString(layer.wkbType()),
             "fields": [] if raster else [field.name() for field in layer.fields()],
@@ -167,7 +167,7 @@ class HostWorkspace:
 
         if raster:
             spec = self.raster_spec(layer, path)
-            metadata.update(tile_version=spec["version"], render={key: spec[key] for key in
+            metadata.update(tile_version=spec["version"], source_version=spec["source_version"], render={key: spec[key] for key in
                             ("bands", "stretch", "resample", "nodata")})
         else:
             stats = [(part.name, part.stat().st_mtime_ns, part.stat().st_size)
@@ -196,6 +196,8 @@ class HostWorkspace:
             "resample": layer.customProperty("remoteqgis/resample", "bilinear"),
             "nodata": layer.customProperty("remoteqgis/nodata", None),
         }
+        spec["crs"] = layer.crs().toWkt()
+        spec["source_version"] = sha256(repr((spec["path"], spec["stamp"], spec["crs"])).encode()).hexdigest()[:24]
         spec["version"] = sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:24]
         return spec
 
@@ -294,6 +296,7 @@ class HostWorkspace:
             layer.setName(value["name"])
             set_opacity(layer, value["opacity"])
             apply_style(layer, value.get("style", ""))
+            apply_properties(layer, value.get("properties", ""))
         self.project.removeMapLayers(list(layers.keys() - wanted))
         apply_tree(self.project.layerTreeRoot(), tree, layers)
         self.project.setDirty(True)

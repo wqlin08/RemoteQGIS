@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from pathlib import Path
+
 from qgis.PyQt.QtCore import QCoreApplication, Qt
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
 from .ui.panel import WorkspacePanel
@@ -12,7 +15,7 @@ class RemoteWorkspacePlugin:
         self._panel = None
 
     def initGui(self):
-        self._action = QAction("RemoteQGIS", self.iface.mainWindow())
+        self._action = QAction(QIcon(str(Path(__file__).parent / "icons" / "logo.png")), "RemoteQGIS", self.iface.mainWindow())
         self._action.triggered.connect(self._show_workspace)
         self.iface.addPluginToMenu("&RemoteQGIS", self._action)
         QCoreApplication.instance().aboutToQuit.connect(self._shutdown)
@@ -20,6 +23,7 @@ class RemoteWorkspacePlugin:
     def _show_workspace(self):
         if self._panel is None:
             self._panel = WorkspacePanel(self.iface)
+            self._panel.setWindowIcon(self._action.icon())
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._panel)
         self._panel.show()
         self._panel.raise_()

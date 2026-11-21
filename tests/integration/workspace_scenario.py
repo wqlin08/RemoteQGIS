@@ -9,7 +9,7 @@ from osgeo import gdal, ogr, osr
 
 from qgis.core import (
     QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsField, QgsGeometry, QgsMimeDataUtils, QgsRasterLayer,
-    QgsRectangle, QgsVectorLayer,
+    QgsPalettedRasterRenderer, QgsRectangle, QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QPoint, Qt, QTimer, QVariant
 from qgis.PyQt.QtGui import QColor
@@ -135,10 +135,15 @@ class Scenario:
             layer = proxies.project.mapLayer(proxies.layers[self.raster_id])
             assert isinstance(layer, QgsRasterLayer) and layer.isValid(), layer
             # Native provider work exercises its network preprocessor and PNG decode.
-            block = layer.dataProvider().block(1, QgsRectangle(11240000, 3350000, 11260000, 3370000), 16, 16)
-            assert block.isValid() and not block.isEmpty()
-            color = block.color(8, 8)
-            assert (color >> 24) == 255 and 120 <= (color & 255) <= 135, hex(color)
+            if raster.get("source_version"):
+                assert layer.providerType() == "gdal" and layer.bandCount() == 3
+                block = layer.dataProvider().block(2, QgsRectangle(100.5, 28.5, 101.5, 29.5), 16, 16)
+                assert block.isValid() and block.value(8, 8) == 2000
+            else:
+                block = layer.dataProvider().block(1, QgsRectangle(11240000, 3350000, 11260000, 3370000), 16, 16)
+                assert block.isValid() and not block.isEmpty()
+                color = block.color(8, 8)
+                assert (color >> 24) == 255 and 120 <= (color & 255) <= 135, hex(color)
             self.step = 61
         if self.step == 61:
             color = canvas_center_color(self.panel.iface.mapCanvas())
@@ -146,6 +151,21 @@ class Scenario:
                 self._canvas_checks = getattr(self, "_canvas_checks", 0) + 1
                 assert self._canvas_checks < 50, ("Raster did not render on the canvas", color)
                 return False
+            raster = proxies.descriptors[self.raster_id]
+            if raster.get("source_version"):
+                layer = proxies._local_layers()[self.raster_id]
+                palette = [QgsPalettedRasterRenderer.Class(2000, QColor("#d02c4f"), "示例类别")]
+                layer.setRenderer(QgsPalettedRasterRenderer(layer.dataProvider(), 2, palette))
+                layer.triggerRepaint()
+                self.step = 62
+            else:
+                self.mark("raster-verified")
+                self.step = 7
+        if self.step == 62 and (self.root / "raster-style-host-verified").exists():
+            color = canvas_center_color(self.panel.iface.mapCanvas())
+            if color is None:
+                return False
+            assert color.name() == "#d02c4f", ("Native category color is missing", color)
             self.mark("raster-verified")
             self.step = 7
         if self.step == 7:

@@ -9,9 +9,10 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QTimer, QVariant
 
 from .rasters import RasterTiles
+from .raster_sources import RasterSources
 from .edits import ClientEdits
 from ..common.edits import IDENTITY
-from ..common.layers import apply_style, apply_tree, opacity, read_style, read_tree, set_opacity, validate_tree
+from ..common.layers import apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_tree
 from ..common.vector import field_data, fields_from, geometry_from, unpack
 
 
@@ -53,6 +54,7 @@ class Proxies:
         self.canvas = canvas = iface.mapCanvas()
         self.changed, self.failure = changed, failure
         self.tiles = RasterTiles(connection, canvas, failure)
+        self.raw_rasters = RasterSources(connection)
         self.edits = ClientEdits(self)
         self.project = QgsProject.instance()
         self.layers, self.descriptors = {}, {}
@@ -139,7 +141,7 @@ class Proxies:
         for descriptor in state["layers"]:
             self.descriptors[descriptor["id"]] = descriptor
         self._unavailable.intersection_update(self.descriptors)
-        self.tiles.descriptors = [desc for desc in self.descriptors.values() if desc["kind"] == "raster"]
+        self.tiles.descriptors = [desc for desc in self.descriptors.values() if desc["kind"] == "raster" and not desc.get("source_version")]
         for identifier, local in tuple(self.layers.items()):
             if identifier not in self.descriptors or not self.project.mapLayer(local):
                 self.edits.detach(identifier)
@@ -148,16 +150,21 @@ class Proxies:
         for identifier, descriptor in self.descriptors.items():
             if identifier in self.layers:
                 layer = self.project.mapLayer(self.layers[identifier])
-                if descriptor.get("tile_version") and descriptor.get("tile_version") != previous.get(identifier, {}).get("tile_version"):
+                before = previous.get(identifier, {})
+                if descriptor.get("source_version") and descriptor["source_version"] != before.get("source_version"):
+                    self._request_raster(identifier)
+                elif (not descriptor.get("source_version") and descriptor.get("tile_version")
+                      and descriptor["tile_version"] != before.get("tile_version")):
                     layer.setDataSource(self.tiles.uri(descriptor), descriptor["name"], "wms")
                 self._style(layer, descriptor)
-                before = previous.get(identifier, {})
                 if (descriptor["kind"] == "vector" and descriptor.get("vector_version") != before.get("vector_version")
                         and not layer.isEditable() and not self.edits.working_pending(identifier)
                         and identifier not in self.pending and identifier not in self.edits.in_flight):
                     self._request_vector(identifier)
             elif identifier not in self.pending:
-                if descriptor["kind"] == "raster":
+                if descriptor.get("source_version"):
+                    self._request_raster(identifier)
+                elif descriptor["kind"] == "raster":
                     try:
                         self._add(identifier, self.tiles.layer(descriptor))
                     except ValueError as exc:
@@ -170,6 +177,44 @@ class Proxies:
             self._initial_view(state["view"])
         self._schedule_import_focus()
         self.changed()
+
+    def _request_raster(self, key):
+        if key in self.pending:
+            return
+        self.pending.add(key)
+        version = self.descriptors[key]["source_version"]
+        session = self.session
+
+        def completed(data, error):
+            if session != self.session:
+                return
+            self.pending.discard(key)
+            desc = self.descriptors.get(key)
+            if desc is None:
+                return
+            if desc["source_version"] != version:
+                self._request_raster(key)
+                return
+            try:
+                if error:
+                    raise ValueError(error)
+                layer = self.raw_rasters.layer(desc, data)
+                old = self.layers.get(key)
+                self._add(key, layer)
+                self._layout()
+                if old is not None:
+                    was_active = self.iface.activeLayer() == self.project.mapLayer(old)
+                    self.project.removeMapLayer(old)
+                    if was_active:
+                        self.iface.setActiveLayer(layer)
+                self._layout()
+                self._schedule_import_focus()
+                self.changed()
+            except (TypeError, ValueError, OSError, RuntimeError) as exc:
+                self._unavailable.add(key)
+                self.failure(str(exc))
+
+        self.connection.call("raster_source", {"id": key}, completed)
 
     def _request_vector(self, key):
         self.pending.add(key)
@@ -277,6 +322,7 @@ class Proxies:
         layer.setName(descriptor["name"])
         set_opacity(layer, descriptor["opacity"])
         apply_style(layer, descriptor.get("style", ""))
+        apply_properties(layer, descriptor.get("properties", ""))
 
     def _add(self, identifier, layer):
         self._unavailable.discard(identifier)
@@ -294,7 +340,7 @@ class Proxies:
         if not layers and not self.tree and self.group is None:
             return
         if self.group is None:
-            self.group = self.project.layerTreeRoot().addGroup("RemoteQGIS")
+            self.group = self.project.layerTreeRoot().insertGroup(0, "RemoteQGIS")
             self.group.setCustomProperty("remoteqgis", 1)
 
         def partial(nodes):
@@ -311,7 +357,8 @@ class Proxies:
         except RuntimeError:
             self.group = None
             tree = []
-        settings = {key: {"name": layer.name(), "opacity": opacity(layer), "style": read_style(layer)}
+        settings = {key: {"name": layer.name(), "opacity": opacity(layer), "style": read_style(layer),
+                          "properties": read_properties(layer)}
                     for key, layer in layers.items()}
         return tree, settings
 
@@ -428,3 +475,4 @@ class Proxies:
         self.edits.close()
         self.clear()
         self._zoom_import.deleteLater()
+        self.raw_rasters.close()
