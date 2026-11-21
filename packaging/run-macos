@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+bundle=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -d "$bundle/Resources/app" ]; then
+    source="$bundle/Resources/app"
+else
+    source="$bundle"
+fi
+gis=${REMOTEQGIS_QGIS_APP:-}
+if [ -z "$gis" ]; then
+    for candidate in /Applications/QGIS-LTR.app /Applications/QGIS.app "$HOME/Applications/QGIS-LTR.app" "$HOME/Applications/QGIS.app"; do
+        if [ -x "$candidate/Contents/MacOS/bin/python3" ]; then gis="$candidate"; break; fi
+    done
+fi
+if [ -z "$gis" ] || [ ! -x "$gis/Contents/MacOS/bin/python3" ]; then
+    /usr/bin/osascript -e 'display alert "需要 QGIS 3.40 或更高的 3.x 版本" message "请将 QGIS-LTR.app 或 QGIS.app 安装到 Applications。"'
+    exit 1
+fi
+export REMOTEQGIS_QGIS_APP="$gis"
+export PYTHONHOME="$gis/Contents/MacOS"
+resources="$gis/Contents/Resources"
+export PYTHONPATH="$source:$resources/python:$resources/python/site-packages:$resources/python/plugins"
+export PYTHONNOUSERSITE=1
+export QGIS_PREFIX_PATH="$PYTHONHOME"
+export PROJ_LIB="$resources/proj"
+export GDAL_DATA="$resources/gdal"
+export PATH="$PYTHONHOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export REMOTEQGIS_DESKTOP="$PYTHONHOME/QGIS"
+if [ "${1:-}" = --python ]; then
+    shift
+    exec "$PYTHONHOME/bin/python3" "$@"
+fi
+exec "$PYTHONHOME/bin/python3" -m host_manager "$@"
