@@ -126,6 +126,25 @@ class Scenario:
                 self._import_checks = getattr(self, "_import_checks", 0) + 1
                 assert self._import_checks < 50, ("Imported raster was blank before changing its style", color)
                 return False
+            if hasattr(proxies, "set_raster_preview") and raster.get("source_version"):
+                proxies.set_raster_preview(self.raster_id, True)
+                self.step = 41
+            else:
+                self.step = 42
+        if self.step == 41:
+            layer = proxies._local_layers()[self.raster_id]
+            assert layer.providerType() == "wms"
+            color = canvas_center_color(self.panel.iface.mapCanvas())
+            if color is None or color.lightness() >= 240:
+                self._tile_checks = getattr(self, "_tile_checks", 0) + 1
+                assert self._tile_checks < 60, ("Fast preview did not render without a pan", color)
+                return False
+            proxies.set_raster_preview(self.raster_id, False)
+            self.step = 42
+        if self.step == 42:
+            raster = proxies.descriptors[self.raster_id]
+            if raster.get("source_version") and proxies._local_layers()[self.raster_id].providerType() != "gdal":
+                return False
             self.connection.call("pixel", {"id": self.raster_id, "x": 101.2, "y": 29.2}, self._pixel)
             self.step = 5
         if self.step == 6:

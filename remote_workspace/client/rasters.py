@@ -65,6 +65,11 @@ class RasterTiles:
             raise ValueError("QGIS 无法建立 XYZ 影像代理。")
         return layer
 
+    def set_descriptors(self, descriptors):
+        if descriptors != self.descriptors:
+            self.descriptors = descriptors
+            self._schedule()
+
     def _tile_finished(self, reply):
         error = reply.error()
         if not self.connection.ready or error in (QNetworkReply.NoError, QNetworkReply.OperationCanceledError):

@@ -97,6 +97,12 @@ class Browser(QWidget):
         image.addWidget(self._button("影像范围", self._zoom_raster))
         image.addWidget(self._button("波段与拉伸", self._render_raster))
         image.addWidget(self._button("原始像元", self._query_raster))
+        display = QPushButton("显示方式")
+        display_menu = QMenu(display)
+        display_menu.addAction("快速瓦片预览", lambda: self._raster_display(True))
+        display_menu.addAction("原始波段 / 重试", lambda: self._raster_display(False))
+        display.setMenu(display_menu)
+        image.addWidget(display)
         layout.addLayout(image)
         self._pixel_tool = QgsMapToolEmitPoint(iface.mapCanvas())
         self._pixel_tool.canvasClicked.connect(self._pixel_clicked)
@@ -298,6 +304,11 @@ class Browser(QWidget):
         descriptor = self.active_descriptor("raster")
         if descriptor:
             self.proxies.zoom_to_rasters([descriptor["id"]])
+
+    def _raster_display(self, preview):
+        descriptor = self.active_descriptor("raster")
+        if descriptor:
+            self.proxies.set_raster_preview(descriptor["id"], preview)
 
     def _render_raster(self):
         descriptor = self.active_descriptor("raster")

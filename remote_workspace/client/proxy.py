@@ -64,6 +64,7 @@ class Proxies:
         self.layers, self.descriptors = {}, {}
         self.pending = set()
         self._unavailable = set()
+        self._preview_tiles = set()
         self.group = None
         self.tree = []
         self.session, self.revision, self.origin = "", -1, ""
@@ -146,7 +147,8 @@ class Proxies:
         for descriptor in state["layers"]:
             self.descriptors[descriptor["id"]] = descriptor
         self._unavailable.intersection_update(self.descriptors)
-        self.tiles.descriptors = [desc for desc in self.descriptors.values() if desc["kind"] == "raster" and not desc.get("source_version")]
+        self._preview_tiles.intersection_update(self.descriptors)
+        self._update_tiles()
         for identifier, local in tuple(self.layers.items()):
             if identifier not in self.descriptors or not self.project.mapLayer(local):
                 self.edits.detach(identifier)
@@ -157,9 +159,11 @@ class Proxies:
             if identifier in self.layers:
                 layer = self.project.mapLayer(self.layers[identifier])
                 before = previous.get(identifier, {})
-                if descriptor.get("source_version") and descriptor["source_version"] != before.get("source_version"):
+                if (descriptor.get("source_version") and identifier not in self._preview_tiles
+                        and descriptor["source_version"] != before.get("source_version")):
                     self._request_raster(identifier)
-                elif (not descriptor.get("source_version") and descriptor.get("tile_version")
+                elif (descriptor["kind"] == "raster" and layer.providerType() == "wms"
+                      and descriptor.get("tile_version")
                       and descriptor["tile_version"] != before.get("tile_version")):
                     layer.setDataSource(self.tiles.uri(descriptor), descriptor["name"], "wms")
                 self._style(layer, descriptor)
@@ -176,11 +180,11 @@ class Proxies:
                     except ValueError as exc:
                         self._unavailable.add(identifier)
                         self.failure(str(exc))
-                elif descriptor.get("source_version"):
+                elif descriptor.get("source_version") and identifier not in self._preview_tiles:
                     self._request_raster(identifier)
                 elif descriptor["kind"] == "raster":
                     try:
-                        self._add(identifier, self.tiles.layer(descriptor))
+                        self._replace_raster(identifier, self.tiles.layer(descriptor))
                     except ValueError as exc:
                         self._unavailable.add(identifier)
                         self.failure(str(exc))
@@ -190,6 +194,49 @@ class Proxies:
         if (new_session or changed_project) and state.get("view"):
             self._initial_view(state["view"])
         self._schedule_import_focus()
+        self.changed()
+
+    def _update_tiles(self):
+        self.tiles.set_descriptors([desc for key, desc in self.descriptors.items()
+                                    if desc["kind"] == "raster" and (key in self._preview_tiles
+                                                                    or not desc.get("source_version"))])
+
+    def set_raster_preview(self, key, enabled):
+        desc = self.descriptors[key]
+        if enabled:
+            layer = self._local_layers().get(key)
+            if layer is None or layer.providerType() != "wms":
+                try:
+                    layer = self.tiles.layer(desc)
+                except ValueError as exc:
+                    self.failure(str(exc))
+                    return
+                self._preview_tiles.add(key)
+                self._update_tiles()
+                self._replace_raster(key, layer)
+            else:
+                self._preview_tiles.add(key)
+                self._update_tiles()
+        elif desc.get("source_version"):
+            self._preview_tiles.discard(key)
+            self._update_tiles()
+            self._request_raster(key)
+        else:
+            self.failure("此工作站只提供瓦片预览。")
+
+    def _replace_raster(self, key, layer):
+        old = self.layers.get(key)
+        self._add(key, layer)
+        self._layout()
+        if old is not None:
+            was_active = self.iface.activeLayer() == self.project.mapLayer(old)
+            self.project.removeMapLayer(old)
+            if was_active:
+                self.iface.setActiveLayer(layer)
+        self._layout()
+        self._schedule_import_focus()
+        layer.triggerRepaint()
+        self.canvas.refresh()
         self.changed()
 
     def _request_raster(self, key):
@@ -204,7 +251,7 @@ class Proxies:
                 return
             self.pending.discard(key)
             desc = self.descriptors.get(key)
-            if desc is None:
+            if desc is None or key in self._preview_tiles:
                 return
             if desc["source_version"] != version:
                 self._request_raster(key)
@@ -213,20 +260,12 @@ class Proxies:
                 if error:
                     raise ValueError(error)
                 layer = self.raw_rasters.layer(desc, data)
-                old = self.layers.get(key)
-                self._add(key, layer)
-                self._layout()
-                if old is not None:
-                    was_active = self.iface.activeLayer() == self.project.mapLayer(old)
-                    self.project.removeMapLayer(old)
-                    if was_active:
-                        self.iface.setActiveLayer(layer)
-                self._layout()
-                self._schedule_import_focus()
-                self.changed()
+                self._replace_raster(key, layer)
             except (TypeError, ValueError, OSError, RuntimeError) as exc:
                 self._unavailable.add(key)
-                self.failure(str(exc))
+                if self.connection.ready:
+                    self.set_raster_preview(key, True)
+                    self.failure(f"原始波段加载失败（{exc}）。请使用快速瓦片预览，或重试原始波段。")
 
         self.connection.call("raster_source", {"id": key}, completed)
 
@@ -335,6 +374,8 @@ class Proxies:
     def _style(layer, descriptor):
         layer.setName(descriptor["name"])
         set_opacity(layer, descriptor["opacity"])
+        if descriptor["kind"] == "raster" and layer.providerType() == "wms":
+            return
         apply_style(layer, descriptor.get("style", ""))
         apply_properties(layer, descriptor.get("properties", ""))
 
@@ -375,6 +416,10 @@ class Proxies:
         settings = {key: {"name": layer.name(), "opacity": opacity(layer), "style": read_style(layer),
                           "properties": read_properties(layer)}
                     for key, layer in layers.items()}
+        for key, layer in layers.items():
+            desc = self.descriptors[key]
+            if desc["kind"] == "raster" and layer.providerType() == "wms":
+                settings[key].update(style=desc.get("style", ""), properties=desc.get("properties", ""))
         return tree, settings
 
     def _sync_local(self):
@@ -461,7 +506,8 @@ class Proxies:
         self.remote_project = {}
         self.layers.clear()
         self.descriptors.clear()
-        self.tiles.descriptors = []
+        self._preview_tiles.clear()
+        self.tiles.set_descriptors([])
         self.pending.clear()
         self._unavailable.clear()
 
