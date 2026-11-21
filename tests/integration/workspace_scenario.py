@@ -195,6 +195,10 @@ class Scenario:
             assert abs(layer.opacity() - 0.55) < 1e-6
             assert layer.renderer().symbol().color().name() == "#a33b87"
             assert proxies.group.findLayer(layer.id()).parent().name() == "远程数据组"
+            if proxies.descriptors[self.raster_id].get("source_version"):
+                raster = proxies._local_layers()[self.raster_id]
+                assert isinstance(raster.renderer(), QgsPalettedRasterRenderer)
+                assert raster.renderer().classes()[0].color.name() == "#d02c4f"
             self.mark("project-verified")
             self.step = 13
         if self.step == 13:
