@@ -2,11 +2,11 @@
 
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest import TestCase
 
-from remote_workspace.client.raster_sources import RANGE, RasterRelay, RelayHandler
+from remote_workspace.client.raster_sources import RANGE, RasterRelay, RasterSources, RelayHandler
 
 DATA = bytes(range(256)) * 8
 
@@ -36,10 +36,15 @@ class RasterFixture(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         first = start + 1 if mode == "wrong-range" else start
         self.send_header("Content-Range", f"bytes {first}-{end}/{len(DATA)}")
+        if mode in ("short", "wrong-range"):
+            self.send_header("Connection", "close")
         self.end_headers()
         if mode == "short":
             self.wfile.write(data[:7])
-            self.close_connection = True
+        elif mode == "slow-tail":
+            self.wfile.write(data[:7])
+            if self.server.allow_tail.wait(5):
+                self.wfile.write(data[7:])
         else:
             self.wfile.write(data)
 
@@ -55,6 +60,8 @@ class RasterRelayTests(TestCase):
         self.host = self.add_listener(ThreadingHTTPServer(("127.0.0.1", 0), RasterFixture))
         self.host.next_fault = ""
         self.host.requests = []
+        self.host.allow_tail = Event()
+        self.addCleanup(self.host.allow_tail.set)
         self.relay = self.add_listener(RasterRelay(("127.0.0.1", 0), RelayHandler))
         key = "1" * 32
         self.relay.relay = SimpleNamespace(key=key, session=(f"http://127.0.0.1:{self.host.server_port}",
@@ -76,6 +83,17 @@ class RasterRelayTests(TestCase):
             self.assertEqual(headers["Content-Range"], f"bytes 30-90/{len(DATA)}")
             self.assertEqual(body, DATA[30:91])
         self.assertEqual(len(self.host.requests), 4)
+        self.assertEqual([(start, end) for _, start, end in self.host.requests],
+                         [(30, 90), (37, 90), (30, 90), (30, 90)])
+
+    def test_forward_first_bytes_without_waiting_for_the_tail(self):
+        self.host.next_fault = "slow-tail"
+        self.client.request("GET", self.path, headers={"Range": "bytes=30-90"})
+        with self.client.getresponse() as response:
+            self.assertEqual(response.status, 206)
+            self.assertEqual(response.read(7), DATA[30:37])
+            self.host.allow_tail.set()
+            self.assertEqual(response.read(), DATA[37:91])
 
     def test_reuse_connection_and_preserve_multipart_bytes(self):
         for range_header, data in (("0-63", DATA[:64]), ("200-204", DATA[200:205])):
@@ -87,3 +105,18 @@ class RasterRelayTests(TestCase):
         self.assertIn(DATA[12:18], body)
         self.assertIn(DATA[255:263], body)
         self.assertEqual(len({peer for peer, _, _ in self.host.requests}), 1)
+
+    def test_existing_raster_remains_authorized_during_reconnect(self):
+        connection = SimpleNamespace(origin="http://127.0.0.1:8765", authorization=b"Bearer fixture",
+                                     status_changed=SimpleNamespace(connect=lambda _: None))
+        sources = RasterSources(connection)
+        sources.status("connected", "")
+        sources.status("retry", "")
+        sources.status("connecting", "")
+        self.assertEqual(sources.session, (connection.origin, "Bearer fixture"))
+        connection.origin = "http://127.0.0.1:9876"
+        sources.status("connecting", "")
+        self.assertEqual(sources.session, ("", ""))
+        sources.status("connected", "")
+        sources.status("idle", "")
+        self.assertEqual(sources.session, ("", ""))

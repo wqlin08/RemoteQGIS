@@ -174,6 +174,10 @@ class Proxies:
                       and descriptor["tile_version"] != before.get("tile_version")):
                     layer.setDataSource(self.tiles.uri(descriptor), descriptor["name"], "wms")
                 if descriptor != before:
+                    if (descriptor["kind"] == "raster" and layer.providerType() == "gdal"
+                            and descriptor.get("properties") != before.get("properties")):
+                        # An in-flight job can cache the old style after the repaint invalidates it.
+                        self.canvas.stopRendering()
                     self._style(layer, descriptor)
                     updated_styles.add(identifier)
                 if (descriptor["kind"] == "vector" and descriptor.get("vector_version") != before.get("vector_version")

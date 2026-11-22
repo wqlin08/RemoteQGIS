@@ -4,7 +4,7 @@ Host Manager 使用工作站已安装的 QGIS 3.40 或更新的 3.x 版本。管
 
 ## 安装与首次配置
 
-Windows x64 双击发行文件 `RemoteQGIS-Host-Manager-Windows-x64-1.1.0-rc8-Setup.exe`。安装完成后，选择 QGIS 的安装目录，例如 `D:\QGIS`。程序会检查该目录中的 QGIS Desktop 与 Python 启动脚本。升级前退出旧管理服务，并退出管理界面。Windows 安装程序会建立当前用户的开始菜单入口。
+Windows x64 双击发行文件 `RemoteQGIS-Host-Manager-Windows-x64-1.1.0-rc9-Setup.exe`。安装完成后，选择 QGIS 的安装目录，例如 `D:\QGIS`。程序会检查该目录中的 QGIS Desktop 与 Python 启动脚本。升级前退出旧管理服务，并退出管理界面。Windows 安装程序会建立当前用户的开始菜单入口。
 
 macOS 解压发行 ZIP，将 `RemoteQGIS Host Manager.app` 放入「应用程序」。首次打开时选择已安装的 `QGIS-LTR.app` 或 `QGIS.app`。构建和测试时可通过 `REMOTEQGIS_QGIS_APP` 指定安装路径。
 

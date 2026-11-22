@@ -16,6 +16,8 @@ ROUTE = r"/[0-9a-f]{32}/[0-9a-f]{32}/([A-Za-z0-9_]+)/([0-9a-f]{24})/(source\.tif
 RANGE = re.compile(r"bytes=(\d{1,20})-(\d{1,20})")
 CONTENT_RANGE = re.compile(r"bytes (\d{1,20})-(\d{1,20})/(\d{1,20})")
 CHUNK = 16 * 1024 * 1024
+BLOCK = 64 * 1024
+READ_ERRORS = (OSError, ValueError, EOFError, HTTPException)
 
 
 class RasterRelay(ThreadingHTTPServer):
@@ -67,7 +69,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                     self.forward_large(endpoint, header, path, start, end)
                     return
             self.send_upstream(endpoint, header, path, request_range)
-        except (OSError, ValueError, EOFError, HTTPException):
+        except READ_ERRORS:
             if not self.response_started:
                 self.send_error(502, "Could not read complete raster bytes")
             self.close_connection = True
@@ -85,55 +87,93 @@ class RelayHandler(BaseHTTPRequestHandler):
         headers = {"Authorization": header}
         if request_range:
             headers["Range"] = request_range
+        connection.request(method, path, headers=headers)
+        reply = connection.getresponse()
+        try:
+            forwarded = {name: value for name in
+                         ("Content-Length", "Content-Type", "Accept-Ranges", "Content-Range")
+                         if (value := reply.getheader(name)) is not None}
+            if reply.status in (500, 502, 503, 504):
+                raise HTTPException(f"Raster upstream HTTP {reply.status}")
+            if method == "HEAD":
+                return reply, forwarded, 0, None
+            length = int(forwarded.get("Content-Length", -1))
+            if not 0 <= length <= CHUNK or reply.chunked:
+                raise ValueError("Invalid raster response length")
+            size = length if reply.status == 200 else None
+            if request_range and reply.status < 400:
+                request = RANGE.fullmatch(request_range)
+                content = CONTENT_RANGE.fullmatch(forwarded.get("Content-Range", ""))
+                if reply.status != 206 or not request or not content:
+                    raise ValueError("Raster server did not return a byte range")
+                first, last, size = map(int, content.groups())
+                if (not first <= last < size or first != int(request[1]) or last != min(int(request[2]), size - 1)
+                        or last - first + 1 != length):
+                    raise ValueError("Raster server returned a different byte range")
+            return reply, forwarded, length, size
+        except READ_ERRORS:
+            reply.close()
+            raise
+
+    def transfer(self, endpoint, header, path, request_range, *, method=None, send_headers=True, expected=None):
+        requested = RANGE.fullmatch(request_range)
+        start = int(requested[1]) if requested else 0
+        written, initial = 0, None
         for attempt in range(2):
+            current_range = request_range
+            # Range validation makes it safe to resume at the first byte not yet sent.
+            if written:
+                current_range = f"bytes={start + written}-{start + total - 1}"
             try:
-                connection.request(method, path, headers=headers)
-                reply = connection.getresponse()
-                forwarded = {name: value for name in
-                             ("Content-Length", "Content-Type", "Accept-Ranges", "Content-Range")
-                             if (value := reply.getheader(name)) is not None}
-                if reply.status in (500, 502, 503, 504):
-                    raise HTTPException(f"Raster upstream HTTP {reply.status}")
-                if method == "HEAD":
-                    reply.read()
-                    return reply.status, forwarded, b""
-                length = int(forwarded.get("Content-Length", -1))
-                if not 0 <= length <= CHUNK:
-                    raise ValueError("Invalid raster response length")
-                if request_range and reply.status < 400:
-                    request = RANGE.fullmatch(request_range)
-                    content = CONTENT_RANGE.fullmatch(forwarded.get("Content-Range", ""))
-                    if reply.status != 206 or not request or not content:
-                        raise ValueError("Raster server did not return a byte range")
-                    first, last, size = map(int, content.groups())
-                    if (not first <= last < size or first != int(request[1]) or last != min(int(request[2]), size - 1)
-                            or last - first + 1 != length):
-                        raise ValueError("Raster server returned a different byte range")
-                data = reply.read(length + 1)
-                if len(data) != length:
-                    raise EOFError("Raster response was cut short")
-                return reply.status, forwarded, data
-            except (OSError, ValueError, EOFError, HTTPException):
-                connection.close()
+                reply, headers, length, size = self.fetch(endpoint, header, path, current_range, method)
+            except READ_ERRORS:
+                if self.connection_to_host is not None:
+                    self.connection_to_host.close()
                 if attempt:
                     raise
+                continue
+            with reply:
+                if initial is None:
+                    if expected is not None and (reply.status != 206 or length != expected):
+                        self.connection_to_host.close()
+                        raise EOFError("Incomplete raster range")
+                    initial = reply.status, headers
+                    total, initial_size = length, size
+                    if send_headers:
+                        self.response_started = True
+                        self.send_response(reply.status)
+                        for name, value in headers.items():
+                            self.send_header(name, value)
+                        self.end_headers()
+                elif (length != total - written or initial_size != size
+                      or reply.status != (206 if written else initial[0])):
+                    self.connection_to_host.close()
+                    raise EOFError("Raster range changed while resuming")
+                while written < total:
+                    try:
+                        data = reply.read1(min(BLOCK, total - written))
+                    except READ_ERRORS:
+                        break
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    written += len(data)
+                if written == total:
+                    return initial
+            self.connection_to_host.close()
+            if initial_size is None:
+                break
+        raise EOFError("Raster response was cut short")
 
     def send_upstream(self, endpoint, header, path, request_range):
-        status, headers, data = self.fetch(endpoint, header, path, request_range)
-        self.response_started = True
-        self.send_response(status)
-        for name, value in headers.items():
-            self.send_header(name, value)
-        self.end_headers()
-        if data:
-            self.wfile.write(data)
+        self.transfer(endpoint, header, path, request_range)
 
     def file_size(self, endpoint, header, path):
-        status, headers, _ = self.fetch(endpoint, header, path, "", "HEAD")
+        status, headers = self.transfer(endpoint, header, path, "", method="HEAD", send_headers=False)
         if status != 200:
             self.send_error(status)
             return None
-        return int(headers["Content-Length"])
+        return int(headers.get("Content-Length", ""))
 
     def forward_multiple(self, endpoint, header, path, ranges):
         matches = [RANGE.fullmatch("bytes=" + part.strip()) for part in ranges.split(",")]
@@ -183,10 +223,8 @@ class RelayHandler(BaseHTTPRequestHandler):
     def copy_span(self, endpoint, header, path, start, end):
         for offset in range(start, end + 1, CHUNK):
             end_offset = min(end, offset + CHUNK - 1)
-            status, _, data = self.fetch(endpoint, header, path, f"bytes={offset}-{end_offset}")
-            if status != 206 or len(data) != end_offset - offset + 1:
-                raise EOFError("Incomplete raster range")
-            self.wfile.write(data)
+            self.transfer(endpoint, header, path, f"bytes={offset}-{end_offset}",
+                          send_headers=False, expected=end_offset - offset + 1)
 
 
 class RasterSources:
@@ -199,13 +237,15 @@ class RasterSources:
         connection.status_changed.connect(self.status)
 
     def status(self, state, _detail):
+        current = self.connection.origin, self.connection.authorization.decode("ascii")
         if state == "connected":
-            self.session = (self.connection.origin, self.connection.authorization.decode("ascii"))
-        else:
+            self.session = current
+        elif state not in ("retry", "connecting") or self.session != current:
             self.session = ("", "")
 
     def layer(self, descriptor, manifest):
         from qgis.core import QgsRasterLayer
+        from ..common.layers import validate_properties
 
         if self.server is None:
             self.server = RasterRelay(("127.0.0.1", 0), RelayHandler)
@@ -230,7 +270,14 @@ class RasterSources:
             item.text = "/vsicurl/" + url
         path = Path(self.directory.name) / f"{uuid4().hex}.vrt"
         ElementTree.ElementTree(root).write(path, encoding="utf-8")
-        layer = QgsRasterLayer(str(path), descriptor["name"], "gdal", QgsRasterLayer.LayerOptions(False))
+        style = descriptor.get("properties", "")
+        if style:
+            validate_properties(style)
+            # Reading the workstation style at open avoids resampling the TIFF merely to build a default stretch.
+            appearance = ElementTree.fromstring(style)
+            appearance.set("styleCategories", "Symbology|Rendering|Legend")
+            ElementTree.ElementTree(appearance).write(path.with_suffix(".qml"), encoding="utf-8")
+        layer = QgsRasterLayer(str(path), descriptor["name"], "gdal", QgsRasterLayer.LayerOptions(bool(style)))
         if not layer.isValid():
             raise ValueError("QGIS 无法创建原始波段栅格代理。")
         return layer
