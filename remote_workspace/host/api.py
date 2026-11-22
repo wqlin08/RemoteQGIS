@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import asyncio
+from collections import OrderedDict
 from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -11,7 +12,7 @@ from tornado.websocket import WebSocketClosedError, WebSocketHandler
 
 from ..common.protocol import EVENTS_PATH, INFO_PATH, MAX_MESSAGE_BYTES, authorized
 from ..common.workspace import API, MAX_DOCUMENT, TILES, WorkspaceError
-from .rasters import MAX_ZOOM, render, sample
+from .rasters import MAX_ZOOM, categories, sample
 from .raster_source import MEMBER, SOURCE, raster_manifest, read_range
 
 
@@ -88,17 +89,18 @@ class TileHandler(Authenticated, RequestHandler):
     async def get(self, identifier, version, zoom, x, y):
         spec = self.api.state[2].get(identifier)
         z, x, y = int(zoom), int(x), int(y)
-        if not spec or version != spec["version"] or z > MAX_ZOOM or x >= 1 << z or y >= 1 << z:
-            raise HTTPError(404, reason="影像瓦片或版本不存在。")
+        if z > MAX_ZOOM or x >= 1 << z or y >= 1 << z:
+            raise HTTPError(404, reason="影像瓦片不存在。")
+        if not spec or version != spec["version"]:
+            raise HTTPError(410, reason="工作区或瓦片版本已更新。")
         try:
-            self._job = asyncio.create_task(self.api.tile_job(
-                render, spec["path"], spec["stamp"], spec["bands"], spec["stretch"],
-                spec["resample"], spec["nodata"], z, x, y,
-            ))
+            self._job = asyncio.create_task(self.api.render_tile(identifier, version, z, x, y))
             image = await self._job
         except asyncio.CancelledError:
             return
-        except (WorkspaceError, RuntimeError, OSError):
+        except WorkspaceError as exc:
+            raise HTTPError(exc.status, reason=str(exc))
+        except (RuntimeError, OSError):
             raise HTTPError(422, reason="影像瓦片读取失败。")
         self.set_header("Content-Type", "image/png")
         self.set_header("Cache-Control", "private, max-age=31536000")
@@ -135,6 +137,9 @@ class HostAPI:
         self.state = state
         self.dispatcher = dispatcher
         self._raster_workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="RemoteQGIS raster")
+        self._tile_slots = asyncio.Semaphore(4)
+        self._tile_cache = OrderedDict()
+        self._tile_tasks = {}
         self.clients: Set[EventsHandler] = set()
         self._sending = set()
         self.application = Application(
@@ -158,14 +163,38 @@ class HostAPI:
     async def tile_job(self, function, *args):
         return await asyncio.get_running_loop().run_in_executor(self._raster_workers, function, *args)
 
+    async def render_tile(self, *key):
+        if key in self._tile_cache:
+            self._tile_cache.move_to_end(key)
+            return self._tile_cache[key]
+        if key not in self._tile_tasks:
+            task = asyncio.create_task(self._render_and_cache(key))
+            # A map pan can drop every waiter before an in-flight render finishes.
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            self._tile_tasks[key] = task
+        return await asyncio.shield(self._tile_tasks[key])
+
+    async def _render_and_cache(self, key):
+        try:
+            async with self._tile_slots:
+                tile = await asyncio.wrap_future(self.dispatcher.submit_tile(*key))
+            self._tile_cache[key] = tile
+            if len(self._tile_cache) > 512:
+                self._tile_cache.popitem(last=False)
+            return tile
+        finally:
+            self._tile_tasks.pop(key, None)
+
     async def call(self, operation: str, arguments: dict):
-        if operation in ("pixel", "raster_source"):
+        if operation in ("pixel", "raster_source", "raster_categories"):
             key = arguments.get("id")
             spec = self.state[2].get(key) if isinstance(key, str) else None
             if spec is None:
                 raise WorkspaceError("影像不存在。", 404)
             if operation == "raster_source":
                 return await self.tile_job(raster_manifest, spec["path"], spec["stamp"], spec["crs"])
+            if operation == "raster_categories":
+                return await self.tile_job(categories, spec, arguments.get("band"))
             return await self.tile_job(sample, spec, arguments.get("x"), arguments.get("y"))
         future = self.dispatcher.submit(operation, arguments)
         return await asyncio.wait_for(asyncio.wrap_future(future), 40)
@@ -193,6 +222,10 @@ class HostAPI:
             self._sending.discard(client)
 
     async def close(self):
+        pending = tuple(self._tile_tasks.values())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         self._raster_workers.shutdown(wait=False, cancel_futures=True)
         for client in tuple(self.clients):
             client.close(1001, "Host stopped")

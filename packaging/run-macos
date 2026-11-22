@@ -7,31 +7,66 @@ else
     source="$bundle"
 fi
 qgis_location="$HOME/Library/Application Support/RemoteQGIS Host/qgis-installation.txt"
-gis=${REMOTEQGIS_QGIS_APP:-}
-if [ -z "$gis" ] && [ -r "$qgis_location" ]; then
-    saved=$(cat "$qgis_location")
-    if [ -x "$saved/Contents/MacOS/bin/python3" ]; then gis="$saved"; fi
-fi
-if [ -z "$gis" ]; then
-    for candidate in /Applications/QGIS-LTR.app /Applications/QGIS.app "$HOME/Applications/QGIS-LTR.app" "$HOME/Applications/QGIS.app"; do
-        if [ -x "$candidate/Contents/MacOS/bin/python3" ]; then gis="$candidate"; break; fi
+explicit=${REMOTEQGIS_QGIS_APP:-}
+gis=""
+persist=0
+
+find_qgis() {
+    for candidate in /Applications/QGIS-LTR.app /Applications/QGIS.app \
+        "$HOME/Applications/QGIS-LTR.app" "$HOME/Applications/QGIS.app" \
+        /Applications/QGIS*.app "$HOME"/Applications/QGIS*.app; do
+        if [ -x "$candidate/Contents/MacOS/bin/python3" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
     done
+    return 1
+}
+
+if [ -n "$explicit" ]; then
+    gis=$explicit
+elif [ -r "$qgis_location" ]; then
+    saved=$(cat "$qgis_location")
+    if [ -x "$saved/Contents/MacOS/bin/python3" ]; then
+        gis=$saved
+    fi
 fi
-if [ -z "$gis" ] || [ ! -x "$gis/Contents/MacOS/bin/python3" ] ||
-   { [ "$#" -eq 0 ] && [ -z "${REMOTEQGIS_QGIS_APP:-}" ] && [ ! -r "$qgis_location" ]; }; then
+
+# Prefer the QGIS already installed in an Applications folder. The previous
+# chooser used AppleScript's "choose application"; its Browse panel launched
+# the selected .app instead of returning its path on macOS 15.
+if [ -z "$gis" ] && [ -z "$explicit" ]; then
+    if gis=$(find_qgis); then
+        persist=1
+    else
+        gis=""
+    fi
+fi
+
+if [ -z "$gis" ]; then
     if [ "${1:-}" = --daemon ] || [ "${1:-}" = --background ]; then
         echo "未找到配置的 QGIS 3.x 应用。" >&2
         exit 1
     fi
-    gis=$(/usr/bin/osascript -e 'POSIX path of (choose application with title "选择已安装的 QGIS 3.x")') || exit 1
+    gis=$(/usr/bin/osascript -e 'text returned of (display dialog "未检测到 QGIS。请输入 QGIS 应用路径：" default answer "/Applications/QGIS-LTR.app" buttons {"取消", "使用"} default button "使用" with title "RemoteQGIS Host Manager"' 2>/dev/null) || exit 1
     gis=${gis%/}
-    if [ ! -x "$gis/Contents/MacOS/bin/python3" ]; then
-        /usr/bin/osascript -e 'display alert "需要 QGIS 3.40 或更高的 3.x 版本"'
+    persist=1
+fi
+
+if [ ! -x "$gis/Contents/MacOS/bin/python3" ]; then
+    /usr/bin/osascript -e 'display alert "所选路径不是完整的 QGIS 3.x 应用。请选择包含 Contents/MacOS/bin/python3 的 QGIS-LTR.app 或 QGIS.app。"'
+    echo "所选路径不是完整的 QGIS 3.x 应用：$gis" >&2
+    exit 1
+fi
+
+if [ "$persist" -eq 1 ]; then
+    umask 077
+    if ! mkdir -p "$(dirname "$qgis_location")" ||
+       ! printf '%s\n' "$gis" > "$qgis_location"; then
+        /usr/bin/osascript -e 'display alert "无法保存 QGIS 路径，请检查当前用户的 Library/Application Support 权限。"'
+        echo "无法保存 QGIS 路径：$qgis_location" >&2
         exit 1
     fi
-    umask 077
-    mkdir -p "$(dirname "$qgis_location")"
-    printf '%s\n' "$gis" > "$qgis_location"
 fi
 export REMOTEQGIS_QGIS_APP="$gis"
 export REMOTEQGIS_MANAGER_LAUNCHER="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"

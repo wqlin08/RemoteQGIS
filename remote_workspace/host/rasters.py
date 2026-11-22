@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from functools import lru_cache
 import math
 from pathlib import Path
-from uuid import uuid4
 
 import numpy as np
 from osgeo import gdal
@@ -13,7 +11,6 @@ from ..common.workspace import WorkspaceError
 HALF_WORLD = 20037508.342789244
 TILE_SIZE = 256
 MAX_ZOOM = 22
-RESAMPLING = ("near", "bilinear", "cubic", "average")
 
 
 def file_stamp(path):
@@ -41,55 +38,24 @@ def dataset(path, stamp):
     return source
 
 
-@lru_cache(maxsize=128)
-def limits(path, stamp, index):
-    source = dataset(path, stamp)
-    band = source.GetRasterBand(index)
-    sample = band.ReadAsArray(buf_xsize=min(256, band.XSize), buf_ysize=min(256, band.YSize))
-    valid = np.isfinite(sample)
+def categories(spec, number):
+    source = dataset(spec["path"], spec["stamp"])
+    if type(number) is not int or not 1 <= number <= source.RasterCount:
+        raise WorkspaceError("请选择有效波段。")
+    band = source.GetRasterBand(number)
+    values = band.ReadAsArray(buf_xsize=min(band.XSize, 1024), buf_ysize=min(band.YSize, 1024))
+    if values is None or np.iscomplexobj(values):
+        raise WorkspaceError("无法采样此波段的类别。", 422)
+    valid = np.isfinite(values)
     nodata = band.GetNoDataValue()
     if nodata is not None:
-        valid &= sample != nodata
-    values = sample[valid]
-    if not values.size:
-        return 0.0, 1.0
-    minimum, maximum = np.percentile(values, (2, 98))
-    if minimum == maximum:
-        minimum, maximum = min(0, float(minimum)), max(255, float(maximum))
-    return float(minimum), float(maximum)
-
-
-@lru_cache(maxsize=512)
-def render(path, stamp, bands, stretch, resample, nodata, z, x, y):
-    source = dataset(path, stamp)
-    vrt = gdal.Translate("", source, format="VRT", bandList=list(bands))
-    warped = gdal.Warp("", vrt, format="MEM", dstSRS="EPSG:3857", outputBounds=tile_bounds(z, x, y),
-                       width=TILE_SIZE, height=TILE_SIZE, dstAlpha=True, outputType=gdal.GDT_Float32,
-                       resampleAlg=resample, srcNodata=nodata)
-    if warped is None:
-        raise WorkspaceError("影像瓦片重投影失败。", 422)
-    rgb = []
-    valid = warped.GetRasterBand(len(bands) + 1).ReadAsArray() > 0
-    for i, index in enumerate(bands):
-        samples = warped.GetRasterBand(i + 1).ReadAsArray()
-        valid &= np.isfinite(samples)
-        lo, hi = stretch[i] if stretch else limits(path, stamp, index)
-        scaled = np.nan_to_num((samples - lo) * (255 / (hi - lo)), nan=0)
-        rgb.append(np.clip(scaled, 0, 255).astype(np.uint8))
-    if len(rgb) == 1:
-        rgb *= 3
-    png = gdal.GetDriverByName("MEM").Create("", TILE_SIZE, TILE_SIZE, 4, gdal.GDT_Byte)
-    for index, data in enumerate([*rgb, valid.astype(np.uint8) * 255], 1):
-        png.GetRasterBand(index).WriteArray(data)
-    temporary = f"/vsimem/remoteqgis-{uuid4().hex}.png"
-    try:
-        result = gdal.GetDriverByName("PNG").CreateCopy(temporary, png)
-        if result is None:
-            raise WorkspaceError("无法编码影像瓦片。", 422)
-        result = None
-        return bytes(gdal.VSIGetMemFileBuffer_unsafe(temporary))
-    finally:
-        gdal.Unlink(temporary)
+        valid &= values != nodata
+    if spec["nodata"] is not None:
+        valid &= values != spec["nodata"]
+    unique = np.unique(values[valid])
+    if unique.size > 256:
+        raise WorkspaceError("采样值超过 256 种。可手动填写类别，或改用连续伪彩色。", 422)
+    return {"values": unique.tolist()}
 
 
 def sample(spec, x, y):

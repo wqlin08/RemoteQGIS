@@ -13,12 +13,13 @@ from qgis.core import (
     QgsProviderRegistry, QgsWkbTypes,
 )
 
-from ..common.layers import GROUP_ID, apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_settings, validate_tree
+from ..common.layers import GROUP_ID, apply_properties, apply_style, apply_tree, opacity, raster_qml, read_properties, read_style, read_tree, set_opacity, validate_settings, validate_tree
 from ..common.online import ONLINE_PROPERTY, online_uri, source_from_layer
 from ..common.workspace import PROJECTS, RASTERS, VECTORS, WorkspaceError
 from .files import SharedFiles
 from .vectors import VectorEdits, digest, snapshot
-from .rasters import RESAMPLING, file_stamp
+from .rasters import file_stamp
+from .raster_style import RESAMPLING, color_renderer, color_settings, sampling_options
 from .project_files import ProjectFiles
 from .view import DesktopView
 from .processing import RemoteProcessing
@@ -206,48 +207,69 @@ class HostWorkspace:
         }
 
         if raster:
-            spec = self.raster_spec(layer, path)
+            spec = self.raster_spec(layer, path, metadata["properties"])
             metadata.update(tile_version=spec["version"], source_version=spec["source_version"], render={key: spec[key] for key in
-                            ("bands", "stretch", "resample", "nodata")})
+                            ("mode", "bands", "stretch", "resample", "nodata")})
+            metadata["render"]["configured_resample"] = layer.customProperty("remoteqgis/resample", "current")
+            metadata["render"].update(color_settings(layer.renderer()))
         else:
             stats = [(part.name, part.stat().st_mtime_ns, part.stat().st_size)
                      for part in self.files.parts(path) if not part.name.endswith("-shm")]
             metadata["vector_version"] = digest(sorted(stats))
         return metadata
 
-    def raster_spec(self, layer, path):
+    def raster_spec(self, layer, path, properties):
         renderer = layer.renderer()
         bands = [1, 2, 3] if layer.bandCount() >= 3 else [1]
         stretch = []
+        mode = "current"
         if isinstance(renderer, QgsMultiBandColorRenderer):
+            mode = "rgb"
             chosen = [renderer.redBand(), renderer.greenBand(), renderer.blueBand()]
             if all(band > 0 for band in chosen):
                 bands = chosen
                 stretch = [renderer.redContrastEnhancement(), renderer.greenContrastEnhancement(),
                            renderer.blueContrastEnhancement()]
         elif isinstance(renderer, QgsSingleBandGrayRenderer):
+            mode = "gray"
             bands = [renderer.grayBand()]
             stretch = [renderer.contrastEnhancement()]
         stretch = [(item.minimumValue(), item.maximumValue()) for item in stretch] if all(stretch) else []
         if any(not math.isfinite(lo) or not math.isfinite(hi) or lo >= hi for lo, hi in stretch):
             stretch = []
         spec = {
-            "path": str(path), "stamp": file_stamp(path), "bands": tuple(bands), "stretch": tuple(stretch),
-            "resample": layer.customProperty("remoteqgis/resample", "bilinear"),
+            "path": str(path), "stamp": file_stamp(path), "mode": mode,
+            "bands": tuple(bands), "stretch": tuple(stretch),
+            "resample": layer.customProperty("remoteqgis/resample", "near"),
             "nodata": layer.customProperty("remoteqgis/nodata", None),
         }
         spec["crs"] = layer.crs().toWkt()
         spec["source_version"] = sha256(repr((spec["path"], spec["stamp"][:3], spec["crs"])).encode()).hexdigest()[:24]
-        spec["version"] = sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:24]
+        spec["version"] = sha256(json.dumps(["qgis-1.2", spec, properties], sort_keys=True).encode()).hexdigest()[:24]
         return spec
 
     def render(self, data):
         layer = self.layer(data, QgsRasterLayer)
+        base = data.get("base")
+        if base is not None:
+            self.refresh()
+            if base != self.rasters.get(layer.id(), {}).get("version"):
+                raise WorkspaceError("工作站的影像样式已变更，请刷新后重试。", 409)
+        if "qml" in data:
+            apply_properties(layer, raster_qml(data["qml"], layer.bandCount()))
+            layer.removeCustomProperty("remoteqgis/resample")
+            self.project.setDirty(True)
+            return {}
         bands = data.get("bands")
         stretch = data.get("stretch", [])
         resample = data.get("resample", "bilinear")
         nodata = data.get("nodata")
-        if not isinstance(bands, list) or len(bands) not in (1, 3) or any(
+        alpha = data.get("opacity", opacity(layer))
+        mode = data.get("mode", "rgb" if isinstance(bands, list) and len(bands) == 3 else "gray")
+        if mode not in ("gray", "rgb", "palette", "pseudocolor", "current"):
+            raise WorkspaceError("影像渲染方式无效。")
+        allowed_counts = (1, 3) if mode == "current" else ((3,) if mode == "rgb" else (1,))
+        if not isinstance(bands, list) or len(bands) not in allowed_counts or any(
             type(band) is not int or not 1 <= band <= layer.bandCount() for band in bands
         ):
             raise WorkspaceError("请选择一个灰度波段或三个 RGB 波段。")
@@ -259,10 +281,32 @@ class HostWorkspace:
             )
         ):
             raise WorkspaceError("每个波段的拉伸下限须小于上限。")
-        if resample not in RESAMPLING or nodata is not None and (
+        if (not isinstance(resample, str) or (resample != "current" and resample not in RESAMPLING) or nodata is not None and (
             type(nodata) not in (int, float) or not math.isfinite(nodata)
-        ):
+        )):
             raise WorkspaceError("重采样方式或 NoData 值无效。")
+        if type(alpha) not in (int, float) or not 0 <= alpha <= 1:
+            raise WorkspaceError("不透明度须在 0 到 100% 之间。")
+        if mode == "current":
+            renderer = layer.renderer()
+        elif mode in ("palette", "pseudocolor"):
+            renderer = color_renderer(layer, mode, bands[0], data)
+        else:
+            renderer = self.contrast_renderer(layer, bands, stretch)
+        if mode != "current":
+            if layer.renderer() is not None:
+                renderer.copyCommonProperties(layer.renderer(), False)
+            layer.setRenderer(renderer)
+        renderer.setOpacity(alpha)
+        sampling_options(layer, "near" if mode == "palette" else resample, nodata)
+        if mode in ("gray", "rgb") and not stretch:
+            layer.setDefaultContrastEnhancement()
+        layer.triggerRepaint()
+        self.project.setDirty(True)
+        return {}
+
+    @staticmethod
+    def contrast_renderer(layer, bands, stretch):
         provider = layer.dataProvider()
         renderer = (QgsSingleBandGrayRenderer(provider, bands[0]) if len(bands) == 1
                     else QgsMultiBandColorRenderer(provider, *bands))
@@ -276,16 +320,7 @@ class HostWorkspace:
             enhance.setMinimumValue(pair[0])
             enhance.setMaximumValue(pair[1])
             setter(enhance)
-        renderer.setOpacity(opacity(layer))
-        layer.setRenderer(renderer)
-        layer.setCustomProperty("remoteqgis/resample", resample)
-        if nodata is None:
-            layer.removeCustomProperty("remoteqgis/nodata")
-        else:
-            layer.setCustomProperty("remoteqgis/nodata", nodata)
-        layer.triggerRepaint()
-        self.project.setDirty(True)
-        return {}
+        return renderer
 
     def current_view(self):
         adapter = self.view_adapter
@@ -374,7 +409,7 @@ class HostWorkspace:
             try:
                 desc = self.describe(layer)
                 if desc and desc["kind"] == "raster":
-                    rasters[layer.id()] = self.raster_spec(layer, self.source(layer)[0])
+                    rasters[layer.id()] = self.raster_spec(layer, self.source(layer)[0], desc["properties"])
                 if desc:
                     descriptors[layer.id()] = desc
             except OSError:

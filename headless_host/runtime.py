@@ -51,7 +51,7 @@ def _serve(app, config, initial_project, viewer_token):
         if stopping:
             return
         stopping = True
-        dispatcher.active = False
+        dispatcher.stop()
         workspace.processing.close()
         service.stop()
 

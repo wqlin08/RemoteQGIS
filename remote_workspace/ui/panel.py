@@ -192,7 +192,7 @@ class WorkspacePanel(QDockWidget):
 
     def _stop_host(self):
         if self._host is not None:
-            self._dispatcher.active = False
+            self._dispatcher.stop()
             self._workspace.processing.close()
             self._host.stop()
             self._poll_host()
@@ -204,7 +204,7 @@ class WorkspacePanel(QDockWidget):
             self._host_timer.stop()
             self._release_host_lease()
             self._host = None
-            self._dispatcher.active = False
+            self._dispatcher.stop()
             self._dispatcher.deleteLater()
             self._dispatcher = None
         if status.state != self._host_state:
@@ -292,7 +292,7 @@ class WorkspacePanel(QDockWidget):
         self.stations.requests.close()
         self._host_timer.stop()
         if self._host is not None:
-            self._dispatcher.active = False
+            self._dispatcher.stop()
             self._workspace.processing.close()
             self._host.stop()
             self._release_host_lease()

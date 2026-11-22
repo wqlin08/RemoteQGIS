@@ -71,6 +71,31 @@ def validate_properties(text):
         raise WorkspaceError("栅格渲染器类型不受支持。")
 
 
+def raster_qml(text, band_count):
+    if not isinstance(text, str) or len(text) > 1024 * 1024 or "<!ENTITY" in text:
+        raise WorkspaceError("QML 文件过大或格式无效。")
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise WorkspaceError("无法解析 QGIS 栅格样式。") from exc
+    pipe = root.find("pipe")
+    renderer = pipe.find("rasterrenderer") if pipe is not None else None
+    if root.tag != "qgis" or renderer is None:
+        raise WorkspaceError("QML 文件中没有 QGIS 栅格样式。")
+    try:
+        bands = [int(renderer.get(key)) for key in ("band", "grayBand", "redBand", "greenBand", "blueBand", "alphaBand")
+                 if renderer.get(key) is not None]
+    except ValueError as exc:
+        raise WorkspaceError("QML 样式中的波段编号无效。") from exc
+    if any(band < -1 or band > band_count for band in bands):
+        raise WorkspaceError("QML 样式引用了当前影像不存在的波段。")
+    style = ElementTree.Element("qgis", {"styleCategories": "Symbology|Rendering|Legend"})
+    style.append(pipe)
+    document = canonical_xml(style)
+    validate_properties(document)
+    return document
+
+
 def apply_properties(layer, text):
     if not text or text == read_properties(layer):
         return

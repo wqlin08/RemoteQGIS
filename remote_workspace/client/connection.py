@@ -177,11 +177,11 @@ class Connection(QObject):
         if status in (401, 403):
             self._fail("远端拒绝访问，请核对访问令牌和服务地址。")
         elif status in (None, 502, 503, 504):
-            self._reconnect(error or "服务暂时不可用。")
+            self._reconnect(f"GIS HTTP 验证失败（{error or '服务暂时不可用'}）。")
         elif status != 200:
             self._fail(f"远端返回 HTTP {status}，请核对服务地址及协议版本。")
         elif error:
-            self._reconnect(error)
+            self._reconnect(f"GIS HTTP 验证失败（{error}）。")
         else:
             try:
                 decode_host_info(raw)
@@ -240,10 +240,10 @@ class Connection(QObject):
         self._reconnect("远端 WebSocket 已断开。")
 
     def _socket_error(self, _error):
-        self._reconnect(self._socket.errorString())
+        self._reconnect(f"WebSocket 连接失败（{self._socket.errorString()}）。")
 
     def _timed_out(self):
-        self._reconnect("连接请求超时。")
+        self._reconnect("GIS HTTP 验证超时。" if self._reply is not None else "WebSocket 握手超时。")
 
     def _tls_failed(self, _errors):
         self._fail("TLS 证书验证失败，请检查远端地址和证书。")

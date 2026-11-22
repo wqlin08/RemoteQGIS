@@ -9,3 +9,8 @@ dist/
 remote_workspace/_vendor/
 .env
 *.log
+docs/
+tests/
+CHANGELOG.md
+开发 prompt.txt
+scripts/test_*.py

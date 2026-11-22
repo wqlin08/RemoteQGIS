@@ -11,6 +11,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..client.proxy import Proxies, crs_from
+from .raster_style import RasterStyleDialog
 from .vectors import VectorActions
 
 MIME_PROVIDER = "remoteqgis"
@@ -96,14 +97,8 @@ class Browser(QWidget):
         layout.addLayout(actions)
         image = QHBoxLayout()
         image.addWidget(self._button("影像范围", self._zoom_raster))
-        image.addWidget(self._button("波段与拉伸", self._render_raster))
+        image.addWidget(self._button("远端符号化…", self._render_raster))
         image.addWidget(self._button("原始像元", self._query_raster))
-        display = QPushButton("显示方式")
-        display_menu = QMenu(display)
-        display_menu.addAction("快速瓦片预览", lambda: self._raster_display(True))
-        display_menu.addAction("原始波段 / 重试", lambda: self._raster_display(False))
-        display.setMenu(display_menu)
-        image.addWidget(display)
         layout.addLayout(image)
         self._pixel_tool = QgsMapToolEmitPoint(iface.mapCanvas())
         self._pixel_tool.canvasClicked.connect(self._pixel_clicked)
@@ -347,50 +342,21 @@ class Browser(QWidget):
         if descriptor:
             self.proxies.zoom_to_rasters([descriptor["id"]])
 
-    def _raster_display(self, preview):
-        descriptor = self.active_descriptor("raster")
-        if descriptor:
-            self.proxies.set_raster_preview(descriptor["id"], preview)
-
     def _render_raster(self):
         descriptor = self.active_descriptor("raster")
         if not descriptor:
             return
-        render = descriptor["render"]
-        text, ok = QInputDialog.getText(
-            self, "远端影像渲染", "波段（1 或 3 个，逗号分隔）",
-            text=",".join(map(str, render["bands"])),
-        )
-        if not ok:
+        if "mode" not in descriptor["render"]:
+            self.show_error("请将工作站升级到 RemoteQGIS 1.2 后编辑远端符号。")
             return
-        stretch, ok = QInputDialog.getText(
-            self, "远端影像渲染", "每个波段的下限:上限，以逗号分隔。留空自动拉伸。",
-            text=",".join(f"{lo}:{hi}" for lo, hi in render["stretch"]),
-        )
-        if not ok:
-            return
-        resampling = ["near", "bilinear", "cubic", "average"]
-        algorithm, ok = QInputDialog.getItem(self, "远端影像渲染", "重采样", resampling,
-                                             resampling.index(render["resample"]), False)
-        if not ok:
-            return
-        nodata, ok = QInputDialog.getText(
-            self, "远端影像渲染", "NoData（留空使用源数据定义）",
-            text="" if render["nodata"] is None else str(render["nodata"]),
-        )
-        if not ok:
-            return
-        try:
-            config = {
-                "id": descriptor["id"], "bands": [int(band) for band in text.split(",")],
-                "stretch": [[float(value) for value in pair.split(":")]
-                            for pair in stretch.split(",")] if stretch.strip() else [],
-                "nodata": float(nodata) if nodata.strip() else None, "resample": algorithm,
-            }
-            self.connection.call("render", config, lambda _, error: self.show_error(error)
-                                 if error else self.proxies.refresh())
-        except ValueError:
-            self.show_error("波段、拉伸区间或 NoData 的格式无效。")
+        dialog = RasterStyleDialog(self, self.connection, descriptor)
+        if dialog.exec():
+            self.connection.call("render", dialog.payload, self._raster_style_applied)
+
+    def _raster_style_applied(self, _, error):
+        self.show_error(error or "工作站已应用影像样式。")
+        if not error:
+            self.proxies.refresh()
 
     def _query_raster(self):
         self._pixel_target = self.active_descriptor("raster")
