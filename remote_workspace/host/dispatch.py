@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from collections import deque
 from concurrent.futures import Future
 
 from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
@@ -15,7 +16,13 @@ class Dispatcher(QObject):
         super().__init__(parent)
         self.workspace = workspace
         self.active = True
+        self._busy = False
+        self._queue = deque()
         self.requested.connect(self._run, Qt.QueuedConnection)
+
+    @property
+    def busy(self):
+        return self._busy
 
     def submit(self, operation: str, data: dict) -> Future:
         result = Future()
@@ -24,6 +31,17 @@ class Dispatcher(QObject):
 
     @pyqtSlot(object, str, object)
     def _run(self, result: Future, operation: str, data: dict):
+        self._queue.append((result, operation, data))
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            while self._queue:
+                self._execute(*self._queue.popleft())
+        finally:
+            self._busy = False
+
+    def _execute(self, result, operation, data):
         if not result.set_running_or_notify_cancel():
             return
         try:

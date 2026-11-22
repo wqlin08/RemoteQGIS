@@ -53,18 +53,25 @@ func installations() []string {
 	return append(roots, filepath.Join(os.Getenv("SystemDrive")+string(os.PathSeparator), "OSGeo4W"))
 }
 
+func installation(root string) (string, string) {
+	for _, flavor := range []string{"qgis-ltr", "qgis"} {
+		batch := filepath.Join(root, "bin", "python-"+flavor+".bat")
+		desktop := filepath.Join(root, "bin", flavor+"-bin.exe")
+		if existing(batch) && existing(desktop) {
+			return batch, desktop
+		}
+	}
+	return "", ""
+}
+
 func locate() (string, string) {
 	roots := installations()
 	if data, err := os.ReadFile(choiceFile()); err == nil && os.Getenv("REMOTEQGIS_QGIS_ROOT") == "" {
 		roots = append([]string{strings.TrimSpace(string(data))}, roots...)
 	}
 	for _, root := range roots {
-		for _, flavor := range []string{"qgis-ltr", "qgis"} {
-			batch := filepath.Join(root, "bin", "python-"+flavor+".bat")
-			desktop := filepath.Join(root, "bin", flavor+"-bin.exe")
-			if existing(batch) && existing(desktop) {
-				return batch, desktop
-			}
+		if batch, desktop := installation(root); batch != "" {
+			return batch, desktop
 		}
 	}
 	return "", ""
@@ -74,32 +81,34 @@ func choiceFile() string {
 	return filepath.Join(os.Getenv("LOCALAPPDATA"), "RemoteQGIS Host", "qgis-installation.txt")
 }
 
-func chooseQGIS() (string, string) {
+func chooseQGIS(defaultRoot string) (string, string) {
 	command := `Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = 'Select the installed QGIS Python launcher (in the QGIS bin folder)'
-$dialog.Filter = 'QGIS Python launcher|python-qgis-ltr.bat;python-qgis.bat'
-if ($dialog.ShowDialog() -eq 'OK') { [Console]::WriteLine($dialog.FileName) }`
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '选择 QGIS 3.x 的安装目录（例如 D:\QGIS）'
+$dialog.ShowNewFolderButton = $false
+$dialog.SelectedPath = $env:REMOTEQGIS_QGIS_CHOICE
+if ($dialog.ShowDialog() -eq 'OK') { [Console]::WriteLine($dialog.SelectedPath) }`
 	shell := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
 		"-NoProfile", "-STA", "-Command", command)
 	shell.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
+	shell.Env = append(os.Environ(), "REMOTEQGIS_QGIS_CHOICE="+defaultRoot)
 	result, err := shell.Output()
 	if err != nil {
 		return "", ""
 	}
-	batch := strings.TrimSpace(string(result))
-	flavor := strings.TrimSuffix(strings.TrimPrefix(strings.ToLower(filepath.Base(batch)), "python-"), ".bat")
-	if flavor != "qgis-ltr" && flavor != "qgis" {
+	root := strings.TrimSpace(string(result))
+	if root == "" {
 		return "", ""
 	}
-	desktop := filepath.Join(filepath.Dir(batch), flavor+"-bin.exe")
-	if !existing(batch) || !existing(desktop) {
+	batch, desktop := installation(root)
+	if batch == "" {
+		showError("所选目录下找不到 QGIS。")
 		return "", ""
 	}
 	if os.Getenv("LOCALAPPDATA") != "" {
 		if os.MkdirAll(filepath.Dir(choiceFile()), 0700) == nil {
-			_ = os.WriteFile(choiceFile(), []byte(filepath.Dir(filepath.Dir(batch))), 0600)
+			_ = os.WriteFile(choiceFile(), []byte(root), 0600)
 		}
 	}
 	return batch, desktop
@@ -120,8 +129,20 @@ func run() error {
 		return err
 	}
 	batch, desktop := locate()
-	if batch == "" && !daemon() {
-		batch, desktop = chooseQGIS()
+	args := os.Args[1:]
+	choose := len(args) == 1 && args[0] == "--choose-qgis"
+	if choose || (batch == "" && !daemon()) {
+		root := ""
+		if batch != "" {
+			root = filepath.Dir(filepath.Dir(batch))
+		}
+		selected, application := chooseQGIS(root)
+		if selected != "" {
+			batch, desktop = selected, application
+		}
+	}
+	if choose {
+		args = nil
 	}
 	if batch == "" {
 		return fmt.Errorf("需要 QGIS 3.40 或更高的 3.x 版本。请先安装 QGIS LTR。自定义安装位置可以设置 REMOTEQGIS_QGIS_ROOT")
@@ -129,9 +150,9 @@ func run() error {
 	source := filepath.Join(filepath.Dir(self), "app")
 	bootstrap := filepath.Join(source, "host_manager", "windows_bootstrap.py")
 	if !existing(bootstrap) {
-		return fmt.Errorf("请解压完整文件夹，并从同一目录打开 RemoteQGIS Host Manager.exe")
+		return fmt.Errorf("找不到 Host Manager 程序组件，请重新运行安装程序")
 	}
-	args, err := json.Marshal(os.Args[1:])
+	document, err := json.Marshal(args)
 	if err != nil {
 		return err
 	}
@@ -144,7 +165,7 @@ func run() error {
 	cmd.Dir = source
 	cmd.Env = append(os.Environ(), "REMOTEQGIS_MANAGER_LAUNCHER="+self, "REMOTEQGIS_DESKTOP="+desktop,
 		"REMOTEQGIS_PYQGIS="+batch, "REMOTEQGIS_BOOTSTRAP="+bootstrap,
-		"REMOTEQGIS_WINDOWS_ARGS="+string(args), "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1", "PYTHONUTF8=1")
+		"REMOTEQGIS_WINDOWS_ARGS="+string(document), "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1", "PYTHONUTF8=1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("无法启动 QGIS Python 运行环境（%w）", err)

@@ -10,8 +10,9 @@ from .ui.panel import WorkspacePanel
 
 
 class RemoteWorkspacePlugin:
-    def __init__(self, iface):
+    def __init__(self, iface, **panel_options):
         self.iface = iface
+        self._panel_options = panel_options
         self._panel = None
 
     def initGui(self):
@@ -22,7 +23,7 @@ class RemoteWorkspacePlugin:
 
     def _show_workspace(self):
         if self._panel is None:
-            self._panel = WorkspacePanel(self.iface)
+            self._panel = WorkspacePanel(self.iface, **self._panel_options)
             self._panel.setWindowIcon(self._action.icon())
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._panel)
         self._panel.show()

@@ -168,7 +168,15 @@ class Scenario:
             color = canvas_center_color(self.panel.iface.mapCanvas())
             if color is None or not 120 <= color.red() <= 135:
                 self._canvas_checks = getattr(self, "_canvas_checks", 0) + 1
-                assert self._canvas_checks < 50, ("Raster did not render on the canvas", color)
+                layer = proxies._local_layers()[self.raster_id]
+                canvas = self.panel.iface.mapCanvas()
+                descriptor = proxies.descriptors[self.raster_id]
+                assert self._canvas_checks < 50, (
+                    "Raster did not render on the canvas", color, layer.renderer().type(),
+                    layer.renderer().usesBands(), descriptor["render"],
+                    canvas.extent().toString(), [item.name() for item in canvas.layers()],
+                    descriptor["properties"],
+                )
                 return False
             raster = proxies.descriptors[self.raster_id]
             if raster.get("source_version"):
@@ -333,7 +341,7 @@ class Scenario:
                 self.connection.call("project", {"action": "save"}, self._final_save)
         if self.step == 210:
             self._prepare_online()
-        if self.step in (212, 213, 214):
+        if self.step in (212, 213, 214, 215):
             self._online_step()
         return self.step == 24
 
@@ -425,6 +433,16 @@ class Scenario:
                                                    self.browser.message.text())
                 return
             self.mark("online-client-verified")
+            # Another raster can be unavailable locally while the project is
+            # still editable and all of its layers must survive the reorder.
+            missing = next(key for key, desc in proxies.descriptors.items()
+                           if desc.get("path") == "测试数据/计算.tif")
+            proxies.project.removeMapLayer(proxies.layers.pop(missing))
+            proxies._unavailable.add(missing)
+            self._drop_on_group(proxies.group.findLayer(proxies.layers[self.shp]))
+            self.mark("layer-order-changed", f"{self.shp}\n{missing}")
+            self.step = 215
+        if self.step == 215 and (self.root / "layer-order-host-verified").exists():
             self.step = 22
             self.connection.call("project", {"action": "save"}, self._final_save)
 

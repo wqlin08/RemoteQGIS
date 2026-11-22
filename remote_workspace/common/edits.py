@@ -30,6 +30,8 @@ class Recovery:
 
     def path(self, origin, descriptor):
         identity = (origin, descriptor["path"], descriptor["table"])
+        if descriptor.get("workspace_scope"):
+            identity += (descriptor["workspace_scope"],)
         key = sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
         return self.directory / f"{key}.json"
 

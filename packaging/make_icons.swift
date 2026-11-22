@@ -7,7 +7,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 // Run from the repository root to regenerate the Host Manager PNGs from logo.png.
-// Export the Windows PNG to a multi-size ICO (16, 24, 32, 48, 64, 128, 256).
+// Export the Windows PNG to packaging/windows/logo.ico (16, 24, 32, 48, 64, 128, 256).
 // Then use rsrc v0.10.2 with -arch amd64 to update packaging/windows/logo_windows_amd64.syso.
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let source = CGImageSourceCreateWithURL(root.appendingPathComponent("logo.png") as CFURL, nil)!

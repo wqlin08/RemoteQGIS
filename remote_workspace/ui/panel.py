@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from qgis.core import Qgis, QgsMessageLog
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
-    QCheckBox, QDockWidget, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QDockWidget, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -37,9 +37,14 @@ def port_field() -> QSpinBox:
 
 
 class WorkspacePanel(QDockWidget):
-    def __init__(self, iface):
+    host_state_changed = pyqtSignal(str, str)
+
+    def __init__(self, iface, *, workspace_factory=HostWorkspace, health_token=""):
         super().__init__("RemoteQGIS", iface.mainWindow())
         self.iface = iface
+        self._workspace_factory = workspace_factory
+        self._health_token = health_token
+        self._last_service_status = None
         self._dispatcher = None
         self._lease = None
         self.setObjectName("RemoteQGISWorkspace")
@@ -87,8 +92,11 @@ class WorkspacePanel(QDockWidget):
         )
         regenerate = QPushButton("重新生成")
         regenerate.clicked.connect(lambda: self.host_token.setText(new_token()))
+        copy = QPushButton("复制")
+        copy.setToolTip("复制访问令牌")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.host_token.text().strip()))
         token_row = QHBoxLayout()
-        for widget in (self.host_token, show_token, regenerate):
+        for widget in (self.host_token, show_token, copy, regenerate):
             token_row.addWidget(widget)
         self.start_host = QPushButton("启动服务")
         self.start_host.clicked.connect(self._start_host)
@@ -113,15 +121,19 @@ class WorkspacePanel(QDockWidget):
         layout = QFormLayout(tab)
         self.remote_host = QLineEdit("127.0.0.1")
         self.remote_port = port_field()
+        self.remote_manager_port = port_field()
+        self.remote_manager_port.setValue(8766)
         self.remote_token = QLineEdit()
         self.remote_token.setEchoMode(QLineEdit.Password)
         self.secure = QCheckBox("HTTPS / WSS")
         self.connect_button = QPushButton("连接")
         self.connect_button.clicked.connect(self._connect)
+        self.managed_connect = QPushButton("启动远端并连接")
         self.disconnect_button = QPushButton("断开")
         self.disconnect_button.clicked.connect(self._disconnect)
         buttons = QHBoxLayout()
         buttons.addWidget(self.connect_button)
+        buttons.addWidget(self.managed_connect)
         buttons.addWidget(self.disconnect_button)
         self.client_status = plain_label("尚未连接。")
         self.info_labels = [plain_label("—") for _ in range(5)]
@@ -130,15 +142,18 @@ class WorkspacePanel(QDockWidget):
         for name, label in zip(("主机名", "QGIS 版本", "系统", "当前项目", "往返延迟"), self.info_labels):
             info.addRow(name, label)
         layout.addRow("主机名或 IP", self.remote_host)
-        layout.addRow("端口", self.remote_port)
+        layout.addRow("GIS 端口", self.remote_port)
+        layout.addRow("管理端口", self.remote_manager_port)
         layout.addRow("访问令牌", self.remote_token)
         layout.addRow(self.secure)
         self.stations = Stations(self)
+        self.managed_connect.clicked.connect(self.stations.connect_address)
         layout.addRow(self.stations)
         layout.addRow(buttons)
         layout.addRow(self.client_status)
         layout.addRow(remote)
-        self._client_fields = (self.remote_host, self.remote_port, self.remote_token, self.secure)
+        self._client_fields = (self.remote_host, self.remote_port, self.remote_manager_port,
+                               self.remote_token, self.secure)
         return tab
 
     def _choose_directory(self):
@@ -150,17 +165,18 @@ class WorkspacePanel(QDockWidget):
         if self._host is not None or self._connection.active:
             return
         try:
+            self._last_service_status = None
             validate_environment()
             config = HostConfig.validate(
                 self.bind_address.text(), self.bind_port.value(), self.directory.text(), self.host_token.text()
             )
             load_tornado()
             self._lease = acquire(config.shared_directory, desktop=True)
+            self._workspace = self._workspace_factory(config.shared_directory, self.iface.mapCanvas())
             self._last_info = host_info()
-            self._workspace = HostWorkspace(config.shared_directory, self.iface.mapCanvas())
             self._dispatcher = Dispatcher(self._workspace, self)
             self._dispatcher.changed.connect(self._publish_snapshot)
-            self._host = HostService(config, self._last_info, self._dispatcher)
+            self._host = HostService(config, self._last_info, self._dispatcher, viewer_token=self._health_token)
         except (ValueError, RuntimeError) as exc:
             if self._lease is not None:
                 self._lease.unlock()
@@ -179,6 +195,7 @@ class WorkspacePanel(QDockWidget):
 
     def _poll_host(self):
         status = self._host.status
+        self._last_service_status = status
         if status.state in ("stopped", "error"):
             self._host_timer.stop()
             self._release_host_lease()
@@ -192,7 +209,7 @@ class WorkspacePanel(QDockWidget):
                 config = self._host.config
                 details["running"] = f"正在监听 {config.address}，端口 {config.port}。"
             self._show_host_status(status.state, status.detail or details.get(status.state, ""))
-        if status.state == "running":
+        if status.state == "running" and not self._dispatcher.busy:
             self._publish_snapshot()
 
     def _release_host_lease(self):
@@ -234,6 +251,7 @@ class WorkspacePanel(QDockWidget):
         self.host_status.setText(detail)
         self._log("host", state)
         self._update_controls()
+        self.host_state_changed.emit(state, detail)
 
     def _client_status(self, state: str, detail: str):
         self.client_status.setText(detail)
@@ -259,6 +277,7 @@ class WorkspacePanel(QDockWidget):
         self.start_host.setEnabled(not hosting and not connecting)
         self.stop_host.setEnabled(hosting and self._host_state != "stopping")
         self.connect_button.setEnabled(not hosting and not connecting)
+        self.managed_connect.setEnabled(not hosting and not connecting)
         self.disconnect_button.setEnabled(connecting)
         for field in self._host_fields:
             field.setEnabled(not hosting)

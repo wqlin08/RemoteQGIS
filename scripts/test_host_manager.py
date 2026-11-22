@@ -15,10 +15,22 @@ from tempfile import TemporaryDirectory
 from test_headless import ROOT, free_port, ready, rpc, wait_for
 
 
+def quiet_profile(root, profile):
+    """Keep the managed QGIS profile from downloading fonts on first use."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "profiles.ini").write_text(
+        f"[core]\nlastProfile={profile}\nselectionPolicy=0\n", encoding="utf-8"
+    )
+    settings = root / "profiles" / profile / "qgis.org/QGIS3.ini"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    # QGIS classifies fixture files under the system temp directory as temporary layers.
+    settings.write_text("[fonts]\ndownloadMissingFonts=false\n[app]\naskToSaveMemoryLayers=false\n",
+                        encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launcher", type=Path, required=True)
-    parser.add_argument("--preview", action="store_true")
     parser.add_argument("--client-zip", type=Path)
     parser.add_argument("--qgis", type=Path)
     args = parser.parse_args()
@@ -28,15 +40,17 @@ def main():
         home = Path(directory)
         shared = home / "shared"
         shared.mkdir()
+        quiet_profile(home / "desktop", "remoteqgis-host")
+        if args.client_zip:
+            quiet_profile(home / "client-profiles", "managed-client")
         launcher = str(args.launcher.resolve())
         subprocess.run([launcher, "--smoke-test-ui", "--state-dir", str(home)], timeout=15, check=True)
         subprocess.run([launcher, "--python", str(ROOT / "tests/integration/make_headless_fixtures.py"),
-                        str(home)], timeout=15, check=True)
+                        str(home), "3"], timeout=30, check=True)
         manager_port, gis_port = free_port(), free_port()
         while manager_port == gis_port:
             gis_port = free_port()
-        config = {"manager_port": manager_port, "port": gis_port, "shared_directory": str(shared),
-                  "allow_preview": args.preview}
+        config = {"manager_port": manager_port, "port": gis_port, "shared_directory": str(shared)}
         (home / "settings.json").write_text(json.dumps(config), encoding="utf-8")
         token, control = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 
@@ -49,7 +63,8 @@ def main():
             if start:
                 command.append("--start-worker")
             proc = subprocess.Popen(command, stdin=subprocess.PIPE, text=True, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT)
+                                    stderr=subprocess.STDOUT, env=dict(
+                                        os.environ, REMOTEQGIS_TEST_CANCEL_CLOSE="1"))
             proc.stdin.write(f"{token}\n{control}\n")
             proc.stdin.close()
             return proc
@@ -82,16 +97,35 @@ def main():
             if not args.client_zip:
                 rpc(gis_port, token, "import", {"paths": ["测试数据/影像.tif", "测试数据/points.gpkg"]})
             rpc(gis_port, token, "view", {"crs": "EPSG:4326", "extent": [98, 26, 104, 32], "rotation": 12})
-            if args.preview:
-                rpc(manager_port, token, "manager_preview")
-                wait_for(lambda: rpc(manager_port, token, "manager_status")["preview"])
-                def displayed():
-                    log = home / "preview.log"
-                    contents = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
-                    return "RemoteQGIS preview layers: 2" in contents and "RemoteQGIS preview rotation: 12" in contents
-
-                wait_for(displayed)
+            wait_for(lambda: "RemoteQGIS Desktop Host ready" in
+                     (home / "host.log").read_text(encoding="utf-8", errors="replace"))
+            rpc(gis_port, token, "workspace_select", {"path": "测试数据"}, status=409)
             rpc(gis_port, token, "project", {"action": "save_as", "path": "managed.qgz"})
+            listed = rpc(gis_port, token, "workspace_directories")
+            assert any(entry["name"] == "测试数据" for entry in listed["entries"])
+            rpc(gis_port, token, "workspace_select", {"path": "../"}, status=400)
+            assert rpc(gis_port, token, "workspace_select", {"path": "测试数据"})["changed"]
+            paths = {entry["path"] for entry in rpc(gis_port, token, "files")["entries"]}
+            assert "影像.tif" in paths and "managed.qgz" not in paths, paths
+            assert not rpc(gis_port, token, "state")["layers"]
+            nested = rpc(gis_port, token, "import", {"paths": ["影像.tif", "points.gpkg"]})
+            vector = next(layer for layer in nested["layers"] if layer["kind"] == "vector")
+            assert vector.get("workspace_scope")
+            rpc(gis_port, token, "edit", {"id": vector["id"]}, status=409)
+            rpc(gis_port, token, "project", {"action": "save_as", "path": "nested.qgz"})
+            # A canceled close must keep the Desktop, the Host and the unsaved
+            # project running; the project also stays protected from switching.
+            rpc(gis_port, token, "import", {"paths": ["影像.tif"]})
+
+            def canceled_close():
+                value = state("running")
+                return value if value and value["requested"] and "取消" in value["detail"] else None
+
+            rpc(manager_port, token, "manager_stop", {"control": control})
+            wait_for(canceled_close, 20)
+            assert rpc(gis_port, token, "state")["layers"]
+            rpc(gis_port, token, "workspace_select", {"path": ""}, status=409)
+            rpc(gis_port, token, "project", {"action": "close", "discard": True})
             rpc(manager_port, token, "manager_stop", {"control": control})
             wait_for(lambda: state("stopped"))
             assert not ready(gis_port, token)
@@ -99,14 +133,17 @@ def main():
             assert proc.wait(timeout=15) == 0, proc.stdout.read()
             proc.stdout.close()
 
-            (home / "settings.json").write_text(json.dumps(dict(config, project="managed.qgz")), encoding="utf-8")
+            (home / "settings.json").write_text(json.dumps(dict(config, project="测试数据/nested.qgz")), encoding="utf-8")
             proc = launch(True)
             wait_for(lambda: ready(manager_port, token))
             wait_for(lambda: state("running"))
             assert len(rpc(gis_port, token, "state")["layers"]) == 2
+            assert rpc(gis_port, token, "workspace_directories")["selected"] == "测试数据"
             if os.name == "posix":
                 lock = shared / ".remoteqgis-writer.lock"
                 worker_pid = int(lock.read_text().splitlines()[0])
+                command = subprocess.check_output(["ps", "-p", str(worker_pid), "-o", "command="], text=True)
+                assert "--code" not in command and "--profile remoteqgis-host" in command, command
                 os.kill(worker_pid, signal.SIGKILL)
 
                 def restored():
@@ -114,6 +151,19 @@ def main():
                             and state("running") and len(rpc(gis_port, token, "state")["layers"]) == 2)
 
                 wait_for(restored)
+            # Manager shutdown uses the same QGIS save prompt and must also
+            # preserve a changed project when the user cancels.
+            rpc(gis_port, token, "import", {"paths": ["影像.tif"]})
+
+            def canceled_shutdown():
+                value = state("running")
+                return value if value and value["requested"] and "取消" in value["detail"] else None
+
+            rpc(manager_port, token, "manager_shutdown", {"control": control})
+            wait_for(canceled_shutdown, 20)
+            assert rpc(gis_port, token, "state")["layers"]
+            # The fixture is disposable. Clear it before closing QGIS to avoid its save dialog.
+            rpc(gis_port, token, "project", {"action": "close", "discard": True})
             rpc(manager_port, token, "manager_shutdown", {"control": control})
             assert proc.wait(timeout=15) == 0, proc.stdout.read()
             for port in (manager_port, gis_port):
@@ -127,8 +177,8 @@ def main():
             if proc is not None:
                 stop_process(proc)
                 proc.stdout.close()
-        print("PASS: Manager GUI, authenticated on-demand startup, shutdown, restart and project restoration"
-              + (", QGIS Desktop preview" if args.preview else "")
+        print("PASS: Manager GUI, on-demand QGIS Desktop Host, authorized workspace switching, canceled close,"
+              " shutdown, restart and project restoration"
               + (", and saved-station QGIS client" if args.client_zip else ""))
 
 

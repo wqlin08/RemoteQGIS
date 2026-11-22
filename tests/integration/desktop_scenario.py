@@ -161,7 +161,19 @@ def host_tick():
             assert not project.mapLayersByName("本地拒绝测试")
             pixel = canvas_center_color(panel.iface.mapCanvas())
             if pixel is not None and pixel.name() == "#2468ac":
+                graph = project.layerTreeRoot()
+                graph.setCustomLayerOrder(panel.iface.mapCanvas().layers())
+                graph.setHasCustomLayerOrder(True)
                 mark("online-host-verified")
+    order = root / "layer-order-changed"
+    if stage == 4 and order.exists() and not (root / "layer-order-host-verified").exists():
+        first, unloaded = order.read_text(encoding="utf-8").splitlines()
+        graph = project.layerTreeRoot()
+        assert graph.findLayer(unloaded) is not None, "Reordering removed the unavailable remote raster"
+        if graph.findLayers()[0].layerId() == first:
+            layers = panel.iface.mapCanvas().layers()
+            if layers and layers[0].id() == first:
+                mark("layer-order-host-verified")
     if stage == 4 and (root / "finish").exists():
         service = panel._host
         assert utils.unloadPlugin(key)

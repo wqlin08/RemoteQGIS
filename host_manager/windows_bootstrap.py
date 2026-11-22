@@ -1,10 +1,24 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import faulthandler
 import json
 import os
 from pathlib import Path
 import runpy
 import sys
+import tempfile
+
+
+_CRASH_LOG = None
+if sys.platform == "win32":
+    try:
+        _CRASH_LOG = (Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) /
+                      "RemoteQGIS" / "manager-crash.log")
+        _CRASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        _CRASH_LOG = _CRASH_LOG.open("a", encoding="utf-8")
+        faulthandler.enable(file=_CRASH_LOG, all_threads=True)
+    except OSError:
+        _CRASH_LOG = None
 
 
 if __name__ == "__main__":

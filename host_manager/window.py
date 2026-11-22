@@ -7,7 +7,7 @@ from pathlib import Path
 from qgis.PyQt.QtCore import QLockFile, Qt, QTimer, QUrl
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtWidgets import (
-    QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QSpinBox, QWidget,
 )
 from qgis.core import Qgis
@@ -53,32 +53,31 @@ class Window(QWidget):
         self.project = QLineEdit(settings.project)
         self.token_field = QLineEdit(self.token or new_token())
         self.token_field.setEchoMode(QLineEdit.Password)
-        self.auto_start = QCheckBox("登录系统时启动后台 Host")
+        self.auto_start = QCheckBox("登录时启动管理服务")
         self.auto_start.setChecked(settings.auto_start)
-        self.allow_preview = QCheckBox("允许连接用户开启只读 QGIS 展示")
-        self.allow_preview.setChecked(settings.allow_preview)
         installation = os.environ.get("REMOTEQGIS_DESKTOP", "")
         version = QLabel(f"QGIS {Qgis.QGIS_VERSION}\n{installation}")
         version.setTextFormat(Qt.PlainText)
         version.setWordWrap(True)
         form.addRow("检测到的运行环境", version)
-        form.addRow("共享目录", self.row(self.folder, self.button("选择…", self.choose_folder)))
+        form.addRow("授权目录", self.row(self.folder, self.button("选择…", self.choose_folder)))
         form.addRow("启动项目", self.row(self.project, self.button("选择…", self.choose_project)))
         form.addRow("本机监听地址", self.address)
         form.addRow("GIS 端口", self.port)
         form.addRow("管理端口", self.manager_port)
         show = QCheckBox("显示")
         show.toggled.connect(lambda shown: self.token_field.setEchoMode(QLineEdit.Normal if shown else QLineEdit.Password))
-        form.addRow("访问令牌", self.row(self.token_field, show, self.button("重新生成", lambda: self.token_field.setText(new_token()))))
-        form.addRow(self.allow_preview)
+        copy = self.button("复制", lambda: QApplication.clipboard().setText(self.token_field.text().strip()))
+        copy.setToolTip("复制访问令牌")
+        regenerate = self.button("重新生成", lambda: self.token_field.setText(new_token()))
+        form.addRow("访问令牌", self.row(self.token_field, show, copy, regenerate))
         form.addRow(self.auto_start)
         self.save = self.button("保存并启动管理服务", self.save_setup)
-        self.start = self.button("启动 Host", lambda: self.send("manager_start"))
-        self.stop = self.button("停止 Host", lambda: self.send("manager_stop"))
-        self.preview = self.button("打开只读展示", lambda: self.send("manager_preview"))
+        self.start = self.button("打开 QGIS", lambda: self.send("manager_start"))
+        self.stop = self.button("关闭 QGIS", lambda: self.send("manager_stop"))
         self.shutdown = self.button("退出管理服务", lambda: self.send("manager_shutdown"))
         form.addRow(self.row(self.save, self.start, self.stop))
-        form.addRow(self.row(self.preview, self.shutdown, self.button("打开日志目录", self.open_logs)))
+        form.addRow(self.row(self.shutdown, self.button("打开日志目录", self.open_logs)))
         self.status = QLabel("请配置共享目录并保存。")
         self.status.setTextFormat(Qt.PlainText)
         self.status.setWordWrap(True)
@@ -124,7 +123,7 @@ class Window(QWidget):
         try:
             settings = Settings(self.address.text().strip(), self.port.value(), self.manager_port.value(),
                                 self.folder.text().strip(), self.project.text().strip(),
-                                self.allow_preview.isChecked(), self.auto_start.isChecked())
+                                self.auto_start.isChecked())
             token = self.token_field.text().strip()
             settings.validate(token)
             self.home.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -172,11 +171,9 @@ class Window(QWidget):
         if value is not None:
             self.startup_checks = 0
             if value["state"] == "stopped":
-                self.status.setText("管理服务已就绪，后台 Host 已停止。")
+                self.status.setText("管理服务已就绪，等待客户端连接。")
             else:
                 self.status.setText(value.get("detail", ""))
-            if value.get("preview"):
-                self.status.setText(self.status.text() + " 正在展示地图。")
         elif self.startup_checks:
             self.startup_checks -= 1
         else:
@@ -201,4 +198,3 @@ class Window(QWidget):
         self.start.setEnabled(value is not None and not value["requested"] and value["state"] != "stopping")
         self.stop.setEnabled(value is not None and value["requested"])
         self.shutdown.setEnabled(value is not None and bool(self.control))
-        self.preview.setEnabled(value is not None and value["state"] == "running" and value["preview_allowed"])

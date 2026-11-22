@@ -11,7 +11,7 @@ from uuid import uuid4
 from pyplugin_installer import instance as plugin_installer
 from qgis import utils
 from qgis.PyQt.QtCore import QTimer
-from qgis.core import QgsRasterLayer, QgsVectorLayer
+from qgis.core import QgsRasterLayer, QgsRectangle, QgsVectorLayer
 
 home = Path(os.environ["REMOTEQGIS_TEST_ROOT"])
 token = os.environ.pop("REMOTEQGIS_TEST_TOKEN")
@@ -69,7 +69,10 @@ def tick():
         proxies = panel.browser.proxies
         if len(proxies.layers) == 2:
             layers = [proxies.project.mapLayer(local) for local in proxies.layers.values()]
-            assert any(isinstance(layer, QgsRasterLayer) and layer.isValid() and layer.bandCount() == 3 for layer in layers)
+            raster, = (layer for layer in layers if isinstance(layer, QgsRasterLayer))
+            assert raster.isValid() and raster.bandCount() == 3 and raster.providerType() == "gdal"
+            block = raster.dataProvider().block(2, QgsRectangle(100.5, 28.5, 101.5, 29.5), 16, 16)
+            assert block.isValid() and block.value(8, 8) == 2000
             assert any(isinstance(layer, QgsVectorLayer) and layer.isValid() and layer.featureCount() == 1 for layer in layers)
             timer.stop()
             panel.disconnect_button.click()

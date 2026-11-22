@@ -29,14 +29,15 @@ class Settings:
     manager_port: int = 8766
     shared_directory: str = ""
     project: str = ""
-    allow_preview: bool = False
     auto_start: bool = False
 
     @classmethod
     def read(cls, path):
         if not path.exists():
             return cls()
-        return cls(**json.loads(path.read_text(encoding="utf-8")))
+        values = json.loads(path.read_text(encoding="utf-8"))
+        values.pop("allow_preview", None)
+        return cls(**values)
 
     def validate(self, token):
         work = HostConfig.validate(self.address, self.port, self.shared_directory, token)

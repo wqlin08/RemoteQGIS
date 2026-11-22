@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from build_plugin import ROOT, package_files
 
@@ -24,8 +23,7 @@ def stage_sources(source, plugin, logo):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(contents)
-    for directory in ("headless_host", "host_manager"):
-        shutil.copytree(ROOT / directory, source / directory, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "host_manager", source / "host_manager", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copyfile(logo, source / "host_manager/logo.png")
 
 
@@ -68,10 +66,13 @@ def macos(stage, output, version, plugin):
     subprocess.run(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(bundle.parent), str(output)], check=True)
 
 
-def windows(stage, output, go, plugin):
+def windows(stage, output, go, makensis, version, plugin):
     compiler = shutil.which(go)
     if compiler is None:
         raise FileNotFoundError(f"Go compiler not found: {go}")
+    installer = shutil.which(makensis)
+    if installer is None:
+        raise FileNotFoundError(f"NSIS compiler not found: {makensis}")
     target = stage / WINDOWS_NAME
     target.mkdir()
     launcher = target / (WINDOWS_NAME + ".exe")
@@ -86,10 +87,12 @@ def windows(stage, output, go, plugin):
     )
     stage_sources(target / "app", plugin, ROOT / "packaging/windows/logo.png")
     shutil.copyfile(ROOT / "docs/host-manager.md", target / "使用说明.md")
-    with ZipFile(output, "w", ZIP_DEFLATED, compresslevel=9) as archive:
-        for path in sorted(target.rglob("*")):
-            if path.is_file():
-                archive.write(path, path.relative_to(stage).as_posix())
+    subprocess.run(
+        [str(Path(installer).resolve()), "-V2", f"-DOUTPUT={output}", f"-DPAYLOAD={target}",
+         f"-DVERSION={version}", f"-DICON={ROOT / 'packaging/windows/logo.ico'}",
+         str(ROOT / "packaging/windows/installer.nsi")],
+        check=True,
+    )
 
 
 def main():
@@ -97,6 +100,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--platform", choices=("both", "macos", "windows"), default="both")
     parser.add_argument("--go", default="go")
+    parser.add_argument("--makensis", default="makensis")
     args = parser.parse_args()
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -111,8 +115,8 @@ def main():
             macos(stage, path, version, plugin)
             print(path)
         if args.platform in ("both", "windows"):
-            path = output / f"RemoteQGIS-Host-Manager-Windows-x64-{version}.zip"
-            windows(stage, path, args.go, plugin)
+            path = output / f"RemoteQGIS-Host-Manager-Windows-x64-{version}-Setup.exe"
+            windows(stage, path, args.go, args.makensis, version, plugin)
             print(path)
 
 

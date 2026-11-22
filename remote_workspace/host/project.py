@@ -339,7 +339,14 @@ class HostWorkspace:
             apply_style(layer, value.get("style", ""))
             apply_properties(layer, value.get("properties", ""))
         self.project.removeMapLayers(list(layers.keys() - wanted))
-        apply_tree(self.project.layerTreeRoot(), tree, layers)
+        root = self.project.layerTreeRoot()
+        apply_tree(root, tree, layers)
+        if root.hasCustomLayerOrder():
+            managed = iter(node.layer() for node in root.findLayers() if node.layerId() in wanted)
+            order = [next(managed, None) if layer.id() in wanted else layer
+                     for layer in root.customLayerOrder() if layer is not None]
+            order.extend(managed)
+            root.setCustomLayerOrder([layer for layer in order if layer is not None])
         self.project.setDirty(True)
         return self.state({})
 

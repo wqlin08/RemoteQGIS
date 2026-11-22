@@ -17,7 +17,8 @@ if [ -z "$gis" ]; then
         if [ -x "$candidate/Contents/MacOS/bin/python3" ]; then gis="$candidate"; break; fi
     done
 fi
-if [ -z "$gis" ] || [ ! -x "$gis/Contents/MacOS/bin/python3" ]; then
+if [ -z "$gis" ] || [ ! -x "$gis/Contents/MacOS/bin/python3" ] ||
+   { [ "$#" -eq 0 ] && [ -z "${REMOTEQGIS_QGIS_APP:-}" ] && [ ! -r "$qgis_location" ]; }; then
     if [ "${1:-}" = --daemon ]; then
         echo "未找到配置的 QGIS 3.x 应用。" >&2
         exit 1

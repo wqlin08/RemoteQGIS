@@ -117,6 +117,8 @@ class ClientEdits:
                 self._unjournaled.discard(key)
                 return
             patch["dataset"] = [descriptor["path"], descriptor["table"]]
+            if descriptor.get("workspace_scope"):
+                patch["workspace_scope"] = descriptor["workspace_scope"]
             self.recovery.store(self.path(descriptor), {"patch": patch, "working": working})
             self._unjournaled.discard(key)
             self.proxies.changed()

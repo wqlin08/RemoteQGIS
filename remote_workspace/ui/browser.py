@@ -78,6 +78,7 @@ class Browser(QWidget):
         navigation.addWidget(self._button("上一级", self._up))
         navigation.addWidget(self.path)
         navigation.addWidget(self._button("刷新", lambda: self.browse(self.path.text())))
+        navigation.addWidget(self._button("工作空间", self.choose_workspace))
         layout.addLayout(navigation)
         layout.addWidget(self.filter)
         layout.addWidget(self.tree)
@@ -136,6 +137,42 @@ class Browser(QWidget):
 
     def show_error(self, message):
         self.message.setText(message)
+
+    def choose_workspace(self, path=""):
+        if not isinstance(path, str):
+            path = ""
+        if self.proxies.edits.has_unrecorded() or any(
+                self.proxies.edits.working_pending(key) for key in self.proxies.edits.records):
+            self.show_error("请先保存并提交本地矢量编辑，再切换工作空间。")
+            return
+
+        def choose(result, error):
+            if error:
+                self.show_error("无法列出工作空间。请通过 Host Manager 连接远端 QGIS。")
+                return
+            current, up = "使用当前目录", "返回上一级"
+            dirs = {f"文件夹 / {entry['name']}": entry["path"] for entry in result["entries"]}
+            options = [current] + ([up] if path else []) + list(dirs)
+            label, ok = QInputDialog.getItem(
+                self, "切换工作空间", f"当前浏览位置  {path or '授权目录'}", options, 0, False,
+            )
+            if not ok:
+                return
+            if label == current:
+                self.connection.call("workspace_select", {"path": path}, self._workspace_selected)
+            elif label == up:
+                self.choose_workspace(path.rpartition("/")[0])
+            else:
+                self.choose_workspace(dirs[label])
+
+        self.connection.call("workspace_directories", {"path": path}, choose)
+
+    def _workspace_selected(self, _result, error):
+        if error:
+            self.show_error(error)
+        else:
+            self.browse("")
+            self.proxies.refresh()
 
     def reject_layer(self, message):
         self.show_error(message)

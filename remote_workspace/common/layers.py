@@ -181,6 +181,36 @@ def validate_tree(tree, known):
     return layers, groups
 
 
+def retain_unloaded(local_tree, remote_tree, unloaded):
+    """Keep real remote nodes which the current client could not materialize."""
+    groups = {}
+
+    def index(nodes):
+        for node in nodes:
+            if "group" in node:
+                groups[node["group"]] = node["children"]
+                index(node["children"])
+
+    def retain(local, remote):
+        for position, node in enumerate(remote):
+            if "group" not in node:
+                if node["id"] in unloaded:
+                    local.insert(position, node)
+                continue
+            target = groups.get(node["group"])
+            if target is not None:
+                retain(target, node["children"])
+            else:
+                children = []
+                retain(children, node["children"])
+                if children:
+                    local.insert(position, dict(node, children=children))
+
+    index(local_tree)
+    retain(local_tree, remote_tree)
+    return local_tree
+
+
 def apply_tree(root, tree, layers, manage_groups=True):
     wanted, groups = validate_tree(tree, layers)
 

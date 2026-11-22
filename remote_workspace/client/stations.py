@@ -30,7 +30,6 @@ class Stations(QWidget):
         except (TypeError, ValueError):
             self.profiles = {}
         self.pending = None
-        self.active_manager = None
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.choices = QComboBox()
@@ -38,9 +37,7 @@ class Stations(QWidget):
         self.use = QPushButton("连接工作站")
         self.save = QPushButton("保存当前地址")
         self.remove = QPushButton("删除")
-        self.preview = QPushButton("远端展示")
-        for button, action in ((self.use, self.connect), (self.save, self.store),
-                               (self.remove, self.delete), (self.preview, self.show_preview)):
+        for button, action in ((self.use, self.connect), (self.save, self.store), (self.remove, self.delete)):
             layout.addWidget(button)
             button.clicked.connect(action)
         self.choices.currentIndexChanged.connect(self.selection_changed)
@@ -60,6 +57,7 @@ class Stations(QWidget):
         if profile is not None:
             self.panel.remote_host.setText(profile["host"])
             self.panel.remote_port.setValue(profile["port"])
+            self.panel.remote_manager_port.setValue(profile["manager_port"] or 8766)
             self.panel.secure.setChecked(profile["tls"])
             self.panel.remote_token.clear()
         self.update_buttons()
@@ -72,7 +70,6 @@ class Stations(QWidget):
         self.use.setEnabled(editable and self.choices.currentData() is not None)
         self.remove.setEnabled(editable and self.choices.currentData() is not None)
         self.save.setEnabled(editable)
-        self.preview.setEnabled(active and self.panel._connection.ready and self.active_manager is not None)
 
     def store(self):
         identifier = self.choices.currentData()
@@ -86,7 +83,7 @@ class Stations(QWidget):
         mode.setCurrentIndex(1 if old and not old.get("manager_port") else 0)
         port = QSpinBox()
         port.setRange(1, 65535)
-        port.setValue(old.get("manager_port") or 8766)
+        port.setValue(self.panel.remote_manager_port.value())
         port.setEnabled(mode.currentIndex() == 0)
         mode.currentIndexChanged.connect(lambda index: port.setEnabled(index == 0))
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -144,75 +141,77 @@ class Stations(QWidget):
         try:
             token = load_token("client-" + identifier)
             manager_port, host, tls = profile["manager_port"], profile["host"], profile["tls"]
-            manager = endpoint(host, manager_port, tls) if manager_port else None
             self.panel.remote_host.setText(host)
             self.panel.remote_port.setValue(profile["port"])
+            self.panel.remote_manager_port.setValue(manager_port or 8766)
             self.panel.remote_token.setText(token)
             self.panel.secure.setChecked(tls)
-            if manager is None:
+            if not manager_port:
                 self.panel._connect()
                 return
-            key = self.pending = object()
-            self.panel._client_status("connecting", "正在检查工作站管理服务…")
-            deadline = time.monotonic() + 70
-
-            def result(value, status, requested=False):
-                if self.pending is not key:
-                    return
-                if not value:
-                    self.pending = None
-                    if not requested and status in (None, 404, 405):
-                        self.panel._connect()
-                    else:
-                        self.panel._client_status("error", f"管理服务请求失败（HTTP {status or '超时'}）。")
-                    return
-                if value.get("port_in_use"):
-                    self.pending = None
-                    self.panel._client_status("error", value["detail"])
-                    return
-                if value["state"] == "running":
-                    if value.get("port") != profile["port"]:
-                        self.pending = None
-                        self.panel._client_status("error", "工作站报告的 GIS 端口和已保存配置不一致。")
-                        return
-                    self.pending = None
-                    self.active_manager = (manager, token) if value.get("preview_allowed") else None
-                    self.panel._connect()
-                    return
-                if time.monotonic() >= deadline:
-                    self.pending = None
-                    self.panel._client_status("error", value.get("detail") or "后台 Host 启动超时。")
-                    return
-                if not value.get("requested"):
-                    self.requests.call(manager, token, "manager_start", {},
-                                       lambda value, status: result(value, status, True))
-                    return
-                self.panel._client_status("connecting", value.get("detail") or "正在等待后台 Host 就绪…")
-
-                def poll():
-                    if self.pending is key:
-                        self.requests.call(manager, token, "manager_status", {},
-                                           lambda value, status: result(value, status, True))
-
-                QTimer.singleShot(800, poll)
-
-            self.requests.call(manager, token, "manager_status", {}, result)
+            self._connect_manager(profile, token)
         except (OSError, ValueError) as exc:
             self.panel._client_status("error", str(exc))
 
+    def connect_address(self):
+        panel = self.panel
+        if panel._connection.active or self.pending is not None:
+            return
+        try:
+            from ..common.protocol import validate_token
+
+            self._connect_manager({"host": panel.remote_host.text(), "port": panel.remote_port.value(),
+                                   "tls": panel.secure.isChecked(), "manager_port": panel.remote_manager_port.value()},
+                                  validate_token(panel.remote_token.text()))
+        except ValueError as exc:
+            panel._client_status("error", str(exc))
+
+    def _connect_manager(self, profile, token):
+        manager = endpoint(profile["host"], profile["manager_port"], profile["tls"])
+        key = self.pending = object()
+        self.panel._client_status("connecting", "正在检查工作站管理服务…")
+        deadline = time.monotonic() + 70
+
+        def result(value, status, requested=False):
+            if self.pending is not key:
+                return
+            if not value:
+                self.pending = None
+                if not requested and status in (None, 404, 405):
+                    self.panel._connect()
+                else:
+                    self.panel._client_status("error", f"管理服务请求失败（HTTP {status or '超时'}）。")
+                return
+            if value.get("port_in_use"):
+                self.pending = None
+                self.panel._client_status("error", value["detail"])
+                return
+            if value["state"] == "running":
+                if value.get("port") != profile["port"]:
+                    self.pending = None
+                    self.panel._client_status("error", "工作站报告的 GIS 端口和已保存配置不一致。")
+                    return
+                self.pending = None
+                self.panel._connect()
+                return
+            if time.monotonic() >= deadline:
+                self.pending = None
+                self.panel._client_status("error", value.get("detail") or "远端 QGIS 启动超时。")
+                return
+            if not value.get("requested"):
+                self.requests.call(manager, token, "manager_start", {},
+                                   lambda value, status: result(value, status, True))
+                return
+            self.panel._client_status("connecting", value.get("detail") or "正在等待远端 QGIS 就绪…")
+
+            def poll():
+                if self.pending is key:
+                    self.requests.call(manager, token, "manager_status", {},
+                                       lambda value, status: result(value, status, True))
+
+            QTimer.singleShot(800, poll)
+
+        self.requests.call(manager, token, "manager_status", {}, result)
+
     def cancel(self):
         self.pending = None
-        self.active_manager = None
-
-    def show_preview(self):
-        if self.active_manager is None:
-            return
-        url, token = self.active_manager
-
-        def completed(value, status):
-            if value:
-                self.panel.client_status.setText("工作站已接受只读展示请求。")
-            else:
-                self.panel.client_status.setText(f"工作站无法启动展示（HTTP {status or '超时'}）。")
-
-        self.requests.call(url, token, "manager_preview", {}, completed)

@@ -12,7 +12,7 @@ LABEL = "org.remoteqgis.host-manager"
 def launch_agent(launcher, home):
     return {"Label": LABEL, "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False},
             "LimitLoadToSessionType": "Aqua", "ThrottleInterval": 15,
-            "ProgramArguments": [str(launcher), "--daemon", "--start-worker"],
+            "ProgramArguments": [str(launcher), "--daemon"],
             "StandardOutPath": str(home / "manager.log"), "StandardErrorPath": str(home / "manager.log")}
 
 
@@ -39,7 +39,7 @@ if ($env:REMOTEQGIS_AUTOSTART -eq '0') {
     }
 } else {
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $action = New-ScheduledTaskAction -Execute $env:REMOTEQGIS_MANAGER_LAUNCHER -Argument '--daemon --start-worker'
+    $action = New-ScheduledTaskAction -Execute $env:REMOTEQGIS_MANAGER_LAUNCHER -Argument '--daemon'
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 `

@@ -14,7 +14,10 @@ from .raster_sources import RasterSources
 from .edits import ClientEdits
 from ..common.edits import IDENTITY
 from ..common.online import ONLINE_PROPERTY
-from ..common.layers import apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree, set_opacity, validate_tree
+from ..common.layers import (
+    apply_properties, apply_style, apply_tree, opacity, read_properties, read_style, read_tree,
+    retain_unloaded, set_opacity, validate_tree,
+)
 from ..common.vector import field_data, fields_from, geometry_from, unpack
 
 
@@ -100,7 +103,7 @@ class Proxies:
             return
         if revision == self.revision:
             return
-        if self._loading:
+        if self._loading or self._sending:
             self._refresh_pending = True
             return
         if self.connection.origin != self.origin:
@@ -137,7 +140,9 @@ class Proxies:
         self.session, self.revision = state["session"], state["revision"]
         changed_project = state["project"].get("path") != self.remote_project.get("path")
         self.remote_project = state["project"]
+        update_tree = new_session or self.group is None
         if "tree" in state:
+            update_tree |= state["tree"] != self.tree
             self.tree = state["tree"]
         previous = self.descriptors.copy()
         if state["full"]:
@@ -155,6 +160,8 @@ class Proxies:
                 self.layers.pop(identifier)
                 if not self.online.release(identifier):
                     self.project.removeMapLayer(local)
+                update_tree = True
+        updated_styles = set()
         for identifier, descriptor in self.descriptors.items():
             if identifier in self.layers:
                 layer = self.project.mapLayer(self.layers[identifier])
@@ -166,7 +173,9 @@ class Proxies:
                       and descriptor.get("tile_version")
                       and descriptor["tile_version"] != before.get("tile_version")):
                     layer.setDataSource(self.tiles.uri(descriptor), descriptor["name"], "wms")
-                self._style(layer, descriptor)
+                if descriptor != before:
+                    self._style(layer, descriptor)
+                    updated_styles.add(identifier)
                 if (descriptor["kind"] == "vector" and descriptor.get("vector_version") != before.get("vector_version")
                         and not layer.isEditable() and not self.edits.working_pending(identifier)
                         and identifier not in self.pending and identifier not in self.edits.in_flight):
@@ -177,6 +186,7 @@ class Proxies:
                         layer = self.online.layer(descriptor)
                         self._add(identifier, layer)
                         layer.setCustomProperty(ONLINE_PROPERTY, True)
+                        update_tree = True
                     except ValueError as exc:
                         self._unavailable.add(identifier)
                         self.failure(str(exc))
@@ -190,7 +200,13 @@ class Proxies:
                         self.failure(str(exc))
                 else:
                     self._request_vector(identifier)
-        self._layout()
+        if update_tree:
+            self._layout()
+        elif updated_styles and self._baseline is not None:
+            _, settings = self._read_local()
+            self._baseline[1].update({key: settings[key] for key in updated_styles if key in settings})
+        if updated_styles:
+            self.canvas.refresh()
         if (new_session or changed_project) and state.get("view"):
             self._initial_view(state["view"])
         self._schedule_import_focus()
@@ -424,12 +440,13 @@ class Proxies:
 
     def _sync_local(self):
         self.online.inspect()
-        if (not self.connection.ready or self._sending or self._loading or self.pending
-                or self._baseline is None or self.revision < 0 or self._unavailable):
+        if (not self.connection.ready or self._sending or self._loading
+                or self._baseline is None or self.revision < 0):
             return
         tree, settings = self._read_local()
         if (tree, settings) == self._baseline:
             return
+        tree = retain_unloaded(tree, self.tree, self.descriptors.keys() - self.layers.keys())
         included, _ = validate_tree(tree, self.descriptors)
         if self._local_layers().keys() - included:
             self.failure("请在 RemoteQGIS 分组内排列远端图层。")
@@ -457,6 +474,9 @@ class Proxies:
             self.refresh()
         else:
             self.apply(result)
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self.refresh()
 
     def _schedule_view(self, *args):
         if not self.read_only and self.connection.ready and self.revision >= 0:
