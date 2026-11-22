@@ -2,6 +2,7 @@
 
 """Manage the normal RemoteQGIS plugin within QGIS's plugin lifecycle."""
 
+from datetime import datetime
 from functools import partial
 import json
 import os
@@ -27,6 +28,8 @@ class DesktopHost(QObject):
         self.plugin = None
         self.ready = self.closing = self.quitting = False
         self.host_started = False
+        self.controls_ready = False
+        self.start_wait = ""
 
     def initGui(self):
         config = json.loads(os.environ.pop("REMOTEQGIS_HOST_CONFIG", "null"))
@@ -43,12 +46,31 @@ class DesktopHost(QObject):
             return
 
         try:
-            self.setup(config, token, health)
+            self.launch_config = config, token, health
+            self.setup()
         except Exception as exc:
             traceback.print_exc()
             self.report_failure(f"QGIS 托管插件初始化失败（{type(exc).__name__}）。详见 host.log。")
 
-    def setup(self, config, token, health):
+    def setup(self):
+        self.watcher = QFileSystemWatcher(self)
+        if not self.watcher.addPath(str(self.stop_file.parent)):
+            raise OSError("无法监听托管 QGIS 的关闭请求目录。")
+        self.watcher.directoryChanged.connect(self.stop_requested, Qt.QueuedConnection)
+        self.retry = self.timer(200, self.stop_requested)
+        self.confirm = self.timer(1000, self.confirm_close)
+        self.test_prompt = self.timer(100, self.cancel_prompt)
+        self.startup = self.timer(200, self.start_host)
+        self.exit_failure = self.timer(200, self.abort_startup)
+        QCoreApplication.instance().aboutToQuit.connect(self.quitting_qgis)
+        self.iface.initializationCompleted.connect(self.startup.start)
+        self.controls_ready = True
+        self.stop_file.with_suffix(".active").touch()
+        self.note("RemoteQGIS managed plugin initialized")
+        # Also handle a native profile which loads this plugin after the signal.
+        self.startup.start()
+
+    def make_panel(self, config, token, health):
         additional_roots = tuple(Path(root) for root in config.get("additional_directories", ()))
         self.plugin = RemoteWorkspacePlugin(
             self.iface, health_token=health, additional_roots=additional_roots, workspace_factory=partial(
@@ -64,22 +86,12 @@ class DesktopHost(QObject):
         panel.directory.setText(config["directory"])
         panel.host_token.setText(token)
         panel.host_state_changed.connect(self.host_status, Qt.QueuedConnection)
+        return panel
 
-        self.watcher = QFileSystemWatcher(self)
-        if not self.watcher.addPath(str(self.stop_file.parent)):
-            raise OSError("无法监听托管 QGIS 的关闭请求目录。")
-        self.watcher.directoryChanged.connect(self.stop_requested, Qt.QueuedConnection)
-        self.retry = self.timer(200, self.stop_requested)
-        self.confirm = self.timer(1000, self.confirm_close)
-        self.test_prompt = self.timer(100, self.cancel_prompt)
-        self.startup = self.timer(200, self.start_host)
-        self.exit_failure = self.timer(200, self.abort_startup)
-        QCoreApplication.instance().aboutToQuit.connect(self.quitting_qgis)
-        self.iface.initializationCompleted.connect(self.startup.start)
-        self.stop_file.with_suffix(".active").touch()
-        print("RemoteQGIS managed plugin initialized", flush=True)
-        # Also handle a native profile which loads this plugin after the signal.
-        self.startup.start()
+    @staticmethod
+    def note(message, file=None):
+        stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        print(f"{stamp} pid={os.getpid()} {message}", file=file, flush=True)
 
     def timer(self, interval, callback):
         timer = QTimer(self, singleShot=True, interval=interval)
@@ -88,10 +100,18 @@ class DesktopHost(QObject):
 
     @pyqtSlot()
     def start_host(self):
-        if self.quitting or self.plugin is None or self.host_started:
+        if self.quitting or self.host_started:
             return
         modal = QApplication.activeModalWidget()
-        if not self.iface.mainWindow().isVisible() or (modal is not None and modal.isVisible()):
+        wait = ""
+        if modal is not None and modal.isVisible():
+            wait = f"QGIS modal dialog ({modal.metaObject().className()})"
+        elif not self.iface.mainWindow().isVisible():
+            wait = "QGIS main window"
+        if wait:
+            if wait != self.start_wait:
+                self.start_wait = wait
+                self.note(f"RemoteQGIS waiting for {wait}")
             self.startup.start()
             return
         if self.stop_file.is_file():
@@ -100,8 +120,10 @@ class DesktopHost(QObject):
                 self.startup.start()
             return
         self.host_started = True
+        parameters, self.launch_config = self.launch_config, None
+        self.note("RemoteQGIS beginning GIS listener setup")
         try:
-            self.plugin._panel._start_host()
+            self.make_panel(*parameters)._start_host()
         except Exception as exc:
             traceback.print_exc()
             self.report_failure(f"QGIS 无法启动托管 GIS 服务（{type(exc).__name__}）。详见 host.log。")
@@ -114,7 +136,7 @@ class DesktopHost(QObject):
             self.stop_file.with_suffix(".startup-error").unlink(missing_ok=True)
             self.stop_file.with_suffix(".ready").touch()
             self.ready = True
-            print("RemoteQGIS Desktop Host ready", flush=True)
+            self.note("RemoteQGIS Desktop Host ready")
         elif state == "error" or (state == "stopped" and self.ready):
             status = self.plugin._panel._last_service_status
             port_in_use = bool(status and status.port_in_use)
@@ -124,12 +146,14 @@ class DesktopHost(QObject):
                 self.exit_failure.start()
 
     def report_failure(self, detail, port_in_use=False):
-        print(detail, file=sys.stderr, flush=True)
+        self.note(detail, sys.stderr)
         self.stop_file.with_suffix(".startup-error").write_text(json.dumps({
             "detail": detail, "port_in_use": port_in_use,
         }, ensure_ascii=False), encoding="utf-8")
 
     def busy(self):
+        if self.plugin is None or self.plugin._panel is None:
+            return False
         dispatcher = self.plugin._panel._dispatcher
         return dispatcher is not None and (dispatcher.busy or any(
             job["state"] not in TERMINAL for job in dispatcher.workspace.processing.jobs.values()
@@ -148,7 +172,7 @@ class DesktopHost(QObject):
 
     @pyqtSlot()
     def stop_requested(self):
-        if (self.quitting or self.closing or self.plugin is None or self.retry.isActive()
+        if (self.quitting or self.closing or not self.controls_ready or self.retry.isActive()
                 or not self.stop_file.is_file()):
             return
         modal = QApplication.activeModalWidget()
@@ -157,7 +181,7 @@ class DesktopHost(QObject):
             return
         self.stop_file.unlink(missing_ok=True)
         self.closing = True
-        print("RemoteQGIS Desktop close requested", flush=True)
+        self.note("RemoteQGIS Desktop close requested")
         project = QgsProject.instance()
         if not project.isDirty() and not QgsApplication.taskManager().countActiveTasks() and not any(
             layer.isTemporary() or (isinstance(layer, QgsVectorLayer) and layer.isEditable())
@@ -206,8 +230,8 @@ class DesktopHost(QObject):
             self.watcher.removePaths(directories)
 
     def unload(self):
+        if self.controls_ready:
+            self.quitting_qgis()
         if self.plugin is not None:
-            if hasattr(self, "watcher") and hasattr(self, "exit_failure"):
-                self.quitting_qgis()
             self.plugin.unload()
             self.plugin = None

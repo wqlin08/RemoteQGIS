@@ -39,6 +39,7 @@ class Window(QWidget):
         self.setWindowTitle(TITLE)
         self.setMinimumWidth(570)
         self.requests = ManagerRequests(self)
+        QApplication.instance().aboutToQuit.connect(self.requests.close)
         self.token, self.control = "", ""
         with suppress(OSError, ValueError):
             self.token = load_token(ACCOUNT)

@@ -30,6 +30,9 @@ def main(home):
         manager.check_desktop()
         assert manager.status()["start_failed"] and manager.status()["desktop_active"]
         assert "尚未加载" in manager.detail and not manager.stop_file.exists()
+        manager.stop_file.with_suffix(".python").touch()
+        manager.check_desktop()
+        assert "已初始化 Python" in manager.detail and not manager.stop_file.exists()
         manager.stop_file.with_suffix(".active").touch()
         manager.check_desktop()
         assert "GIS 服务未就绪" in manager.detail and not manager.stop_file.exists()

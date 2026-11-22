@@ -289,6 +289,7 @@ class WorkspacePanel(QDockWidget):
             field.setEnabled(not connecting)
 
     def shutdown(self):
+        self.stations.requests.close()
         self._host_timer.stop()
         if self._host is not None:
             self._dispatcher.active = False

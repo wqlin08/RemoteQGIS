@@ -184,7 +184,7 @@ class Stations(QWidget):
         manager = endpoint(profile["host"], profile["manager_port"], profile["tls"])
         key = self.pending = object()
         self.panel._client_status("connecting", "正在检查工作站管理服务…")
-        deadline = time.monotonic() + 70
+        deadline = time.monotonic() + 105
         started = False
 
         def result(value, status):

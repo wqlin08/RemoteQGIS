@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from contextlib import suppress
+from datetime import datetime
 import hmac
 import json
 from ipaddress import ip_address
@@ -26,7 +27,7 @@ from remote_workspace.host.service import HostService, PORT_IN_USE_EXIT_CODE, po
 from .process import SOURCE, close_desktop_window, spawn
 
 HTTP = build_opener(ProxyHandler({}))
-START_TIMEOUT = 60
+START_TIMEOUT = 90
 STOP_TIMEOUT = 12
 
 
@@ -48,6 +49,9 @@ def desktop_runtime(home):
     path.parent.mkdir(parents=True, exist_ok=True)
     settings = QSettings(str(path), QSettings.IniFormat)
     settings.setValue("PythonPlugins/remoteqgis_managed", True)
+    # The repaired managed plugin is tried on an explicit launch even if a
+    # previous version left QGIS's crash-watchdog entry behind.
+    settings.remove("PythonPlugins/watchDogTimestamp/remoteqgis_managed")
     settings.setValue("PythonPlugins/processing", True)
     settings.setValue("fonts/downloadMissingFonts", False)
     settings.sync()
@@ -73,6 +77,7 @@ class Manager:
         self.health_token = ""
         self.failure_count = 0
         self.retry_at = self.deadline = self.next_health = 0
+        self.started_at = 0
         self.stop_deadline = 0
         self.start_failed = self.was_ready = False
         self.dispatcher = Dispatcher(self)
@@ -136,16 +141,21 @@ class Manager:
                    }))
         runtime = desktop_runtime(self.home)
         env["QGIS_CUSTOM_CONFIG_PATH"] = str(runtime)
+        env["PYQGIS_STARTUP"] = str(SOURCE / "host_manager/desktop_startup.py")
         command = [executable, "--nologo", "--noversioncheck", "--profile", "remoteqgis-host"]
         launch = self.stop_file.with_suffix(".launch")
         launch.touch()
+        self.started_at = time.monotonic()
         try:
             self.worker = spawn(command, self.home / "host.log", env=env)
         except OSError:
             launch.unlink(missing_ok=True)
             raise
+        with suppress(OSError), (self.home / "host.log").open("a", encoding="utf-8") as log:
+            stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            print(f"{stamp} pid={self.worker.pid} RemoteQGIS launched QGIS Desktop", file=log)
         self.worker_state, self.detail = "starting", "正在启动 QGIS Desktop。"
-        self.deadline = time.monotonic() + START_TIMEOUT
+        self.deadline = self.started_at + START_TIMEOUT
         self.next_health = 0
         self.was_ready = self.start_failed = False
 
@@ -177,7 +187,7 @@ class Manager:
         code = self.worker.poll() if self.worker is not None else None
         if code is not None:
             startup_error = self.startup_error()
-            for suffix in (".launch", ".active", ".ready", ".startup-error", ".canceled", ".stop"):
+            for suffix in (".launch", ".python", ".active", ".ready", ".startup-error", ".canceled", ".stop"):
                 self.stop_file.with_suffix(suffix).unlink(missing_ok=True)
             self.worker = self.stop_file = None
             self.stop_deadline = 0
@@ -190,6 +200,12 @@ class Manager:
                 self.retry_at = time.monotonic() + min(30, 2 ** min(self.failure_count, 5))
                 self.worker_state = "error"
                 self.detail = f"QGIS 已退出（{code}），即将重试。详见 host.log。"
+            elif (self.wanted and sys.platform == "win32" and code & 0xFFFFFFFF == 0xC0000005
+                  and not self.failure_count and not startup_error):
+                self.failure_count = 1
+                self.retry_at = time.monotonic() + 1
+                self.worker_state, self.detail = "starting", "QGIS 在初始化时发生访问违例，正在重试一次。"
+                print(self.detail, file=sys.stderr, flush=True)
             elif self.wanted and (startup_error or not self.was_ready):
                 self.wanted = False
                 self.fail_start(startup_error.get("detail") or f"QGIS 在就绪前已退出（{code}）。详见 host.log。")
@@ -250,20 +266,28 @@ class Manager:
         now = time.monotonic()
         # A listener confirmation from the QGIS process also works when Windows
         # cannot connect to its own VPN address.
-        if self.stop_file.with_suffix(".ready").is_file() or (now >= self.next_health and self.healthy()):
+        ready = self.stop_file.with_suffix(".ready").is_file()
+        if not ready and now >= self.next_health:
+            self.next_health = now + 2
+            ready = self.healthy()
+        if ready:
             self.failure_count = 0
             self.start_failed = False
             self.was_ready = True
             if self.worker_state != "running":
                 self.worker_state, self.detail = "running", "QGIS Desktop 已就绪。"
             self.next_health = now + 4
-        elif now >= self.deadline or self.was_ready:
-            detail = ("QGIS 进程已启动，但托管插件尚未加载。请检查工作站的 QGIS 窗口和 host.log。"
-                      if not self.stop_file.with_suffix(".active").is_file() else
-                      "QGIS 托管插件已加载，但 GIS 服务未就绪。请检查工作站的 QGIS 窗口和 host.log。")
-            self.fail_start(detail)
-            if now >= self.next_health:
-                self.next_health = now + 4
+            return
+        if self.stop_file.with_suffix(".active").is_file():
+            detail = "QGIS 托管插件已加载，GIS 服务未就绪"
+        elif self.stop_file.with_suffix(".python").is_file():
+            detail = "QGIS 已初始化 Python，托管插件尚未加载"
+        else:
+            detail = "正在等待 QGIS 初始化 Python，托管插件尚未加载"
+        if now >= self.deadline or self.was_ready:
+            self.fail_start(f"{detail}。请检查工作站的 QGIS 窗口和 host.log。")
+        elif now - self.started_at >= 10:
+            self.detail = f"{detail}（已等待 {int(now - self.started_at)} 秒）。"
         elif self.stop_file.with_suffix(".active").is_file():
             self.detail = "QGIS 托管插件已加载，正在启动 GIS 服务。"
 

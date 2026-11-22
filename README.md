@@ -8,7 +8,7 @@ RemoteQGIS 是面向 QGIS Desktop 3.x 的远程 GIS 工作空间插件。工作�
 
 ## 双端 QGIS Desktop 手动连接
 
-1. 在两台设备的 QGIS 3.40 或更新的 3.x 版本中，进入「插件 → 管理并安装插件 → 从 ZIP 安装」，选择同一份 `RemoteQGIS-1.1.0-rc6.zip`。
+1. 在两台设备的 QGIS 3.40 或更新的 3.x 版本中，进入「插件 → 管理并安装插件 → 从 ZIP 安装」，选择同一份 `RemoteQGIS-1.1.0-rc7.zip`。
 2. 在工作站打开「插件 → RemoteQGIS → Host · 工作站」，选择共享目录。跨网络使用时，将监听地址改为工作站的 Tailscale IP，端口默认是 `8765`。启动服务后，将访问令牌提供给客户端。
 3. 在客户端选择 **Client · 客户端**，填写工作站的 IP 或主机名、端口和令牌，点击「直接连接 GIS」。认证成功后切换到 **远程工作区**。
 4. 两个本机 QGIS 会话可用 `127.0.0.1` 试用。通过 Tailscale IP 直连时保持 HTTPS / WSS 关闭，由 Tailscale 隧道提供传输加密。使用配置了有效证书的 TLS 反向代理时，启用 HTTPS / WSS。
@@ -35,8 +35,8 @@ RemoteQGIS 是面向 QGIS Desktop 3.x 的远程 GIS 工作空间插件。工作�
 python3 -m unittest discover -s tests/unit -v
 python3 scripts/build_plugin.py
 python3 scripts/build_host_manager.py
-python3 scripts/test_headless.py --zip dist/RemoteQGIS-1.1.0-rc6.zip
-python3 scripts/test_desktop.py --stage 5 --qgis /Applications/QGIS-LTR.app/Contents/MacOS/QGIS --zip dist/RemoteQGIS-1.1.0-rc6.zip
+python3 scripts/test_headless.py --zip dist/RemoteQGIS-1.1.0-rc7.zip
+python3 scripts/test_desktop.py --stage 5 --qgis /Applications/QGIS-LTR.app/Contents/MacOS/QGIS --zip dist/RemoteQGIS-1.1.0-rc7.zip
 ```
 
 Host Manager 的双平台构建在 macOS 上运行，Windows x64 启动器使用 Go 交叉编译，由 NSIS 的 `makensis` 构建单文件安装程序。构建脚本从 PyPI 下载并校验固定版本的 Tornado 源码，将其纯 Python 文件及许可证打入 ZIP。插件使用 QGIS 自带的 Python、Qt 和 GDAL 环境。

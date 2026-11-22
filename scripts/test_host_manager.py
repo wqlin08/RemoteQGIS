@@ -46,6 +46,8 @@ def main():
             quiet_profile(home / "client-profiles", "managed-client")
         launcher = str(args.launcher.resolve())
         subprocess.run([launcher, "--smoke-test-ui", "--state-dir", str(home)], timeout=15, check=True)
+        subprocess.run([launcher, "--python", str(ROOT / "tests/integration/manager_request_scenario.py")],
+                       timeout=15, check=True)
         subprocess.run([launcher, "--python", str(ROOT / "tests/integration/make_headless_fixtures.py"),
                         str(home), "3"], timeout=30, check=True)
         manager_port, gis_port = free_port(), free_port()
@@ -83,11 +85,14 @@ def main():
             wait_for(lambda: state("running"))
             assert ready(gis_port, token)
             assert next(home.glob("desktop-*.ready")).is_file()
+            assert next(home.glob("desktop-*.python")).is_file()
             algorithms = rpc(gis_port, token, "processing_catalog")["algorithms"]
             assert {"native:buffer", "gdal:slope"} <= set(algorithms), algorithms
             rpc(manager_port, token, "manager_stop", {"control": control})
             wait_for(lambda: state("stopped"))
             quiet_profile(home / "desktop", "remoteqgis-host")
+            with (home / "desktop/profiles/remoteqgis-host/qgis.org/QGIS3.ini").open("a", encoding="utf-8") as settings:
+                settings.write("\n[PythonPlugins]\nwatchDogTimestamp\\remoteqgis_managed=1\n")
             with socket.socket() as occupied:
                 if os.name == "posix":
                     occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
