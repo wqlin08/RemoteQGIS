@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 import traceback
 
-from qgis.PyQt.QtCore import QCoreApplication, QFileSystemWatcher, QObject, Qt, QTimer, pyqtSlot
+from qgis.PyQt.QtCore import QCoreApplication, QFileSystemWatcher, QObject, QSettings, Qt, QTimer, pyqtSlot
 from qgis.PyQt.QtWidgets import QApplication, QMessageBox
 from qgis.core import QgsApplication, QgsProject, QgsVectorLayer
 
@@ -66,7 +66,7 @@ class DesktopHost(QObject):
         self.iface.initializationCompleted.connect(self.startup.start)
         self.controls_ready = True
         self.stop_file.with_suffix(".active").touch()
-        self.note("RemoteQGIS managed plugin initialized")
+        self.note(f"RemoteQGIS managed plugin initialized; QGIS settings={QSettings().fileName()}")
         # Also handle a native profile which loads this plugin after the signal.
         self.startup.start()
 

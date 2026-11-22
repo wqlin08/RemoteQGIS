@@ -45,7 +45,9 @@ def desktop_runtime(home):
         "description=Starts RemoteQGIS in the managed QGIS profile.\n",
         encoding="utf-8",
     )
-    path = profile / "qgis.org" / "QGIS3.ini"
+    # QGIS sets both values. Qt uses its organization domain on macOS and its name elsewhere.
+    organization = "qgis.org" if sys.platform == "darwin" else "QGIS"
+    path = profile / organization / "QGIS3.ini"
     path.parent.mkdir(parents=True, exist_ok=True)
     settings = QSettings(str(path), QSettings.IniFormat)
     settings.setValue("PythonPlugins/remoteqgis_managed", True)

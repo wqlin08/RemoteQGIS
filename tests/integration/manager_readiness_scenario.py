@@ -8,15 +8,40 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QSettings
 
-from host_manager.daemon import Manager
+from host_manager.daemon import Manager, desktop_runtime
 from host_manager.settings import Settings
 from remote_workspace.common.protocol import new_token
 
 
+def check_windows_settings(home):
+    local = home / "windows-local"
+    runtime = local / "RemoteQGIS/managed"
+    profile = runtime / "profiles/remoteqgis-host"
+    legacy = profile / "qgis.org/QGIS3.ini"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("[PythonPlugins]\nremoteqgis_managed=true\n", encoding="utf-8")
+    native = profile / "QGIS/QGIS3.ini"
+    native.parent.mkdir()
+    settings = QSettings(str(native), QSettings.IniFormat)
+    settings.setValue("PythonPlugins/remoteqgis_managed", False)
+    settings.setValue("PythonPlugins/watchDogTimestamp/remoteqgis_managed", 1)
+    settings.setValue("locale/userLocale", "zh_CN")
+    settings.sync()
+    with patch.dict("os.environ", LOCALAPPDATA=str(local)), patch("host_manager.daemon.sys", SimpleNamespace(platform="win32")):
+        assert desktop_runtime(home) == runtime
+    settings.sync()
+    assert settings.value("PythonPlugins/remoteqgis_managed", type=bool)
+    assert not settings.contains("PythonPlugins/watchDogTimestamp/remoteqgis_managed")
+    assert settings.value("locale/userLocale") == "zh_CN"
+    assert legacy.read_text(encoding="utf-8") == "[PythonPlugins]\nremoteqgis_managed=true\n"
+    print("PASS: Windows managed profile settings path and preservation", flush=True)
+
+
 def main(home):
     app = QCoreApplication([])
+    check_windows_settings(home)
     control = new_token()
     manager = Manager(app, home, Settings.read(home / "settings.json"), new_token(), control)
     manager.timer.stop()
