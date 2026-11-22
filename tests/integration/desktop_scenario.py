@@ -80,7 +80,7 @@ def setup():
         panel.tabs.setCurrentIndex(1)
         panel.remote_port.setValue(timeout_port)
         panel.remote_token.setText(token)
-        panel.connect_button.click()
+        panel.direct_connect.click()
     timer.timeout.connect(lambda: guarded(host_tick if role == "host" else client_tick))
     timer.start(100)
 
@@ -193,13 +193,13 @@ def client_tick():
         panel.disconnect_button.click()
         panel.remote_port.setValue(port)
         panel.remote_token.setText(secrets.token_urlsafe(32))
-        panel.connect_button.click()
+        panel.direct_connect.click()
         stage = 0
         return
     if stage == 0 and state == "error":
         assert "拒绝访问" in status, status
         panel.remote_token.setText(token)
-        panel.connect_button.click()
+        panel.direct_connect.click()
         stage = 1
         return
     if stage > 0:

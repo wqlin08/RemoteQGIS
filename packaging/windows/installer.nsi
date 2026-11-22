@@ -28,7 +28,8 @@ Function .onInit
         Abort
     ${EndIf}
     ${If} ${FileExists} "$LOCALAPPDATA\RemoteQGIS Host\manager.lock"
-        MessageBox MB_OKCANCEL|MB_ICONINFORMATION "如果旧版正在运行，请在管理窗口点击「退出管理服务」，再关闭窗口。完成后点击确定。" IDOK continue
+    ${OrIf} ${FileExists} "$LOCALAPPDATA\RemoteQGIS Host\window.lock"
+        MessageBox MB_OKCANCEL|MB_ICONINFORMATION "如果旧版正在运行，请点击「退出管理服务」，再从托盘退出管理界面。没有托盘菜单的旧版可直接关闭窗口。完成后点击确定。" IDOK continue
         Abort
     ${EndIf}
     continue:
@@ -55,7 +56,8 @@ SectionEnd
 Section "Uninstall"
     SetShellVarContext current
     ${If} ${FileExists} "$LOCALAPPDATA\RemoteQGIS Host\manager.lock"
-        MessageBox MB_OKCANCEL|MB_ICONINFORMATION "请在 Host Manager 中关闭登录自启，退出管理服务并关闭窗口，然后点击确定。" IDOK uninstall
+    ${OrIf} ${FileExists} "$LOCALAPPDATA\RemoteQGIS Host\window.lock"
+        MessageBox MB_OKCANCEL|MB_ICONINFORMATION "请在 Host Manager 中关闭登录自启，退出管理服务，再从托盘退出管理界面，然后点击确定。" IDOK uninstall
         Abort
     ${EndIf}
     uninstall:

@@ -62,6 +62,7 @@ class Manager:
         self.app, self.home, self.settings, self.token = app, home, settings, token
         self.local_control = local_control
         self.config = settings.validate(token)
+        self.additional_roots = settings.additional_roots(self.config.shared_directory)
         self.worker = self.stop_file = None
         self.worker_state, self.detail = "stopped", ""
         self.wanted = self.closing = False
@@ -117,6 +118,7 @@ class Manager:
                        "address": self.config.address,
                        "port": self.config.port,
                        "directory": str(self.config.shared_directory),
+                       "additional_directories": [str(root) for root in self.additional_roots],
                        "project": self.settings.project,
                        "stop": str(self.stop_file),
                        "workspace": str(self.home / "workspace.json"),

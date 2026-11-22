@@ -40,9 +40,11 @@ class DesktopHost(QObject):
             # A QGIS reload can inherit an old launch's environment.
             return
 
+        additional_roots = tuple(Path(root) for root in config.get("additional_directories", ()))
         self.plugin = RemoteWorkspacePlugin(
-            self.iface, health_token=health, workspace_factory=partial(
+            self.iface, health_token=health, additional_roots=additional_roots, workspace_factory=partial(
                 ManagedWorkspace, selection_file=Path(config["workspace"]), project=config["project"],
+                additional_roots=additional_roots,
             ),
         )
         self.plugin.initGui()
@@ -62,7 +64,7 @@ class DesktopHost(QObject):
         self.startup = self.timer(0, self.start_host)
         self.exit_failure = self.timer(200, self.abort_startup)
         QCoreApplication.instance().aboutToQuit.connect(self.quitting_qgis)
-        self.startup.start()
+        self.iface.initializationCompleted.connect(self.startup.start)
 
     def timer(self, interval, callback):
         timer = QTimer(self, singleShot=True, interval=interval)

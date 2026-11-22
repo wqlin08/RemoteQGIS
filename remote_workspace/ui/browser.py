@@ -138,34 +138,39 @@ class Browser(QWidget):
     def show_error(self, message):
         self.message.setText(message)
 
-    def choose_workspace(self, path=""):
-        if not isinstance(path, str):
-            path = ""
+    def choose_workspace(self):
         if self.proxies.edits.has_unrecorded() or any(
                 self.proxies.edits.working_pending(key) for key in self.proxies.edits.records):
             self.show_error("请先保存并提交本地矢量编辑，再切换工作空间。")
             return
+        self._workspace_folders("0", "")
 
+    def _workspace_folders(self, root, path):
         def choose(result, error):
             if error:
                 self.show_error("无法列出工作空间。请通过 Host Manager 连接远端 QGIS。")
                 return
             current, up = "使用当前目录", "返回上一级"
             dirs = {f"文件夹 / {entry['name']}": entry["path"] for entry in result["entries"]}
-            options = [current] + ([up] if path else []) + list(dirs)
+            roots = {item["id"]: item["name"] for item in result.get("roots", ())}
+            other = {f"授权目录 / {name}": key for key, name in roots.items() if key != root}
+            options = [current] + ([up] if path else []) + list(other) + list(dirs)
+            location = " / ".join(filter(None, (roots.get(root, ""), path)))
             label, ok = QInputDialog.getItem(
-                self, "切换工作空间", f"当前浏览位置  {path or '授权目录'}", options, 0, False,
+                self, "切换工作空间", f"当前浏览位置  {location or '授权目录'}", options, 0, False,
             )
             if not ok:
                 return
             if label == current:
-                self.connection.call("workspace_select", {"path": path}, self._workspace_selected)
+                self.connection.call("workspace_select", {"root": root, "path": path}, self._workspace_selected)
             elif label == up:
-                self.choose_workspace(path.rpartition("/")[0])
+                self._workspace_folders(root, path.rpartition("/")[0])
+            elif label in other:
+                self._workspace_folders(other[label], "")
             else:
-                self.choose_workspace(dirs[label])
+                self._workspace_folders(root, dirs[label])
 
-        self.connection.call("workspace_directories", {"path": path}, choose)
+        self.connection.call("workspace_directories", {"root": root, "path": path}, choose)
 
     def _workspace_selected(self, _result, error):
         if error:

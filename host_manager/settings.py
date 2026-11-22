@@ -29,7 +29,8 @@ class Settings:
     manager_port: int = 8766
     shared_directory: str = ""
     project: str = ""
-    auto_start: bool = False
+    auto_start: bool = True
+    additional_directories: tuple = ()
 
     @classmethod
     def read(cls, path):
@@ -37,10 +38,25 @@ class Settings:
             return cls()
         values = json.loads(path.read_text(encoding="utf-8"))
         values.pop("allow_preview", None)
+        values["additional_directories"] = tuple(values.get("additional_directories", ()))
         return cls(**values)
+
+    def additional_roots(self, primary):
+        roots = []
+        for value in self.additional_directories:
+            try:
+                root = Path(value).expanduser().resolve(strict=True)
+                if not root.is_dir():
+                    raise ValueError(f"其他授权目录无效（{value}）。")
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"无法访问其他授权目录（{value}）。") from exc
+            if root != primary and root not in roots:
+                roots.append(root)
+        return roots
 
     def validate(self, token):
         work = HostConfig.validate(self.address, self.port, self.shared_directory, token)
+        self.additional_roots(work.shared_directory)
         if not 1 <= self.manager_port <= 65535 or self.manager_port == self.port:
             raise ValueError("管理端口须在 1–65535 之间，并与 GIS 端口不同。")
         if self.project:

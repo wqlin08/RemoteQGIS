@@ -114,9 +114,9 @@ if ($dialog.ShowDialog() -eq 'OK') { [Console]::WriteLine($dialog.SelectedPath) 
 	return batch, desktop
 }
 
-func daemon() bool {
+func unattended() bool {
 	for _, arg := range os.Args[1:] {
-		if strings.EqualFold(arg, "--daemon") {
+		if strings.EqualFold(arg, "--daemon") || strings.EqualFold(arg, "--background") {
 			return true
 		}
 	}
@@ -131,7 +131,7 @@ func run() error {
 	batch, desktop := locate()
 	args := os.Args[1:]
 	choose := len(args) == 1 && args[0] == "--choose-qgis"
-	if choose || (batch == "" && !daemon()) {
+	if choose || (batch == "" && !unattended()) {
 		root := ""
 		if batch != "" {
 			root = filepath.Dir(filepath.Dir(batch))
@@ -175,7 +175,7 @@ func run() error {
 
 func main() {
 	if err := run(); err != nil {
-		if daemon() {
+		if unattended() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

@@ -37,9 +37,11 @@ def main():
     if bool(args.client_zip) != bool(args.qgis):
         parser.error("--client-zip and --qgis must be used together")
     with TemporaryDirectory(prefix="remoteqgis-manager-") as directory:
-        home = Path(directory)
+        home = Path(directory).resolve()
         shared = home / "shared"
         shared.mkdir()
+        another = home / "其他数据"
+        (another / "子目录").mkdir(parents=True)
         quiet_profile(home / "desktop", "remoteqgis-host")
         if args.client_zip:
             quiet_profile(home / "client-profiles", "managed-client")
@@ -50,7 +52,8 @@ def main():
         manager_port, gis_port = free_port(), free_port()
         while manager_port == gis_port:
             gis_port = free_port()
-        config = {"manager_port": manager_port, "port": gis_port, "shared_directory": str(shared)}
+        config = {"manager_port": manager_port, "port": gis_port, "shared_directory": str(shared),
+                  "additional_directories": [str(another)]}
         (home / "settings.json").write_text(json.dumps(config), encoding="utf-8")
         token, control = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 
@@ -103,7 +106,14 @@ def main():
             rpc(gis_port, token, "project", {"action": "save_as", "path": "managed.qgz"})
             listed = rpc(gis_port, token, "workspace_directories")
             assert any(entry["name"] == "测试数据" for entry in listed["entries"])
+            assert listed["roots"] == [{"id": "0", "name": str(shared)}, {"id": "1", "name": str(another)}]
             rpc(gis_port, token, "workspace_select", {"path": "../"}, status=400)
+            rpc(gis_port, token, "workspace_select", {"root": "2"}, status=403)
+            rpc(gis_port, token, "workspace_select", {"root": "1", "path": "../"}, status=400)
+            assert rpc(gis_port, token, "workspace_select", {"root": "1"})["changed"]
+            assert rpc(gis_port, token, "workspace_directories")["selected_root"] == "1"
+            assert {entry["name"] for entry in rpc(gis_port, token, "files")["entries"]} == {"子目录"}
+            assert json.loads((home / "workspace.json").read_text(encoding="utf-8"))["root"] == str(another)
             assert rpc(gis_port, token, "workspace_select", {"path": "测试数据"})["changed"]
             paths = {entry["path"] for entry in rpc(gis_port, token, "files")["entries"]}
             assert "影像.tif" in paths and "managed.qgz" not in paths, paths
@@ -137,7 +147,11 @@ def main():
             proc = launch(True)
             wait_for(lambda: ready(manager_port, token))
             wait_for(lambda: state("running"))
-            assert len(rpc(gis_port, token, "state")["layers"]) == 2
+            restored_state = rpc(gis_port, token, "state")
+            assert len(restored_state["layers"]) == 2, (
+                restored_state["project"], rpc(gis_port, token, "workspace_directories"),
+                (home / "workspace.json").read_text(encoding="utf-8"),
+            )
             assert rpc(gis_port, token, "workspace_directories")["selected"] == "测试数据"
             if os.name == "posix":
                 lock = shared / ".remoteqgis-writer.lock"

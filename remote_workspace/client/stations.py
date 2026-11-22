@@ -133,13 +133,23 @@ class Stations(QWidget):
         self.settings.setValue(KEY, json.dumps(self.profiles, ensure_ascii=False))
         self.reload(identifier)
 
+    def address(self):
+        panel = self.panel
+        return {"host": panel.remote_host.text().strip(), "port": panel.remote_port.value(),
+                "tls": panel.secure.isChecked(), "manager_port": panel.remote_manager_port.value()}
+
+    def matches_address(self, profile):
+        return self.address() == {"host": profile["host"], "port": profile["port"], "tls": profile["tls"],
+                                  "manager_port": profile["manager_port"] or 8766}
+
     def connect(self):
         identifier = self.choices.currentData()
         profile = self.profiles.get(identifier)
         if self.panel._connection.active or self.pending is not None or not profile:
             return
         try:
-            token = load_token("client-" + identifier)
+            token = self.panel.remote_token.text().strip() if self.matches_address(profile) else ""
+            token = token or load_token("client-" + identifier)
             manager_port, host, tls = profile["manager_port"], profile["host"], profile["tls"]
             self.panel.remote_host.setText(host)
             self.panel.remote_port.setValue(profile["port"])
@@ -160,10 +170,14 @@ class Stations(QWidget):
         try:
             from ..common.protocol import validate_token
 
-            self._connect_manager({"host": panel.remote_host.text(), "port": panel.remote_port.value(),
-                                   "tls": panel.secure.isChecked(), "manager_port": panel.remote_manager_port.value()},
-                                  validate_token(panel.remote_token.text()))
-        except ValueError as exc:
+            identifier = self.choices.currentData()
+            profile = self.profiles.get(identifier)
+            token = panel.remote_token.text().strip()
+            if not token and profile and profile["manager_port"] and self.matches_address(profile):
+                token = load_token("client-" + identifier)
+                panel.remote_token.setText(token)
+            self._connect_manager(self.address(), validate_token(token))
+        except (OSError, ValueError) as exc:
             panel._client_status("error", str(exc))
 
     def _connect_manager(self, profile, token):
@@ -172,13 +186,17 @@ class Stations(QWidget):
         self.panel._client_status("connecting", "正在检查工作站管理服务…")
         deadline = time.monotonic() + 70
 
-        def result(value, status, requested=False):
+        def result(value, status):
             if self.pending is not key:
                 return
             if not value:
                 self.pending = None
-                if not requested and status in (None, 404, 405):
-                    self.panel._connect()
+                if status == 401:
+                    self.panel._client_status("error", "管理服务拒绝了访问令牌。请从运行中的工作站管理器复制令牌，"
+                                              "粘贴到此处后重新连接。")
+                elif status is None:
+                    self.panel._client_status("error", f"管理端口 {profile['manager_port']} 请求超时。"
+                                              "请检查工作站管理服务和网络。")
                 else:
                     self.panel._client_status("error", f"管理服务请求失败（HTTP {status or '超时'}）。")
                 return
@@ -199,15 +217,13 @@ class Stations(QWidget):
                 self.panel._client_status("error", value.get("detail") or "远端 QGIS 启动超时。")
                 return
             if not value.get("requested"):
-                self.requests.call(manager, token, "manager_start", {},
-                                   lambda value, status: result(value, status, True))
+                self.requests.call(manager, token, "manager_start", {}, result)
                 return
             self.panel._client_status("connecting", value.get("detail") or "正在等待远端 QGIS 就绪…")
 
             def poll():
                 if self.pending is key:
-                    self.requests.call(manager, token, "manager_status", {},
-                                       lambda value, status: result(value, status, True))
+                    self.requests.call(manager, token, "manager_status", {}, result)
 
             QTimer.singleShot(800, poll)
 

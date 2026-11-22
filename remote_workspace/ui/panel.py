@@ -39,14 +39,15 @@ def port_field() -> QSpinBox:
 class WorkspacePanel(QDockWidget):
     host_state_changed = pyqtSignal(str, str)
 
-    def __init__(self, iface, *, workspace_factory=HostWorkspace, health_token=""):
+    def __init__(self, iface, *, workspace_factory=HostWorkspace, health_token="", additional_roots=()):
         super().__init__("RemoteQGIS", iface.mainWindow())
         self.iface = iface
         self._workspace_factory = workspace_factory
         self._health_token = health_token
         self._last_service_status = None
         self._dispatcher = None
-        self._lease = None
+        self._additional_roots = additional_roots
+        self._leases = []
         self.setObjectName("RemoteQGISWorkspace")
         self._host = None
         self._host_state = "stopped"
@@ -127,13 +128,13 @@ class WorkspacePanel(QDockWidget):
         self.remote_token.setEchoMode(QLineEdit.Password)
         self.secure = QCheckBox("HTTPS / WSS")
         self.connect_button = QPushButton("连接")
-        self.connect_button.clicked.connect(self._connect)
-        self.managed_connect = QPushButton("启动远端并连接")
+        self.direct_connect = QPushButton("直接连接 GIS")
+        self.direct_connect.clicked.connect(self._connect)
         self.disconnect_button = QPushButton("断开")
         self.disconnect_button.clicked.connect(self._disconnect)
         buttons = QHBoxLayout()
         buttons.addWidget(self.connect_button)
-        buttons.addWidget(self.managed_connect)
+        buttons.addWidget(self.direct_connect)
         buttons.addWidget(self.disconnect_button)
         self.client_status = plain_label("尚未连接。")
         self.info_labels = [plain_label("—") for _ in range(5)]
@@ -147,7 +148,7 @@ class WorkspacePanel(QDockWidget):
         layout.addRow("访问令牌", self.remote_token)
         layout.addRow(self.secure)
         self.stations = Stations(self)
-        self.managed_connect.clicked.connect(self.stations.connect_address)
+        self.connect_button.clicked.connect(self.stations.connect_address)
         layout.addRow(self.stations)
         layout.addRow(buttons)
         layout.addRow(self.client_status)
@@ -171,16 +172,19 @@ class WorkspacePanel(QDockWidget):
                 self.bind_address.text(), self.bind_port.value(), self.directory.text(), self.host_token.text()
             )
             load_tornado()
-            self._lease = acquire(config.shared_directory, desktop=True)
+            for root in (config.shared_directory, *self._additional_roots):
+                lease = acquire(root, desktop=True)
+                if lease is not None:
+                    self._leases.append(lease)
             self._workspace = self._workspace_factory(config.shared_directory, self.iface.mapCanvas())
             self._last_info = host_info()
             self._dispatcher = Dispatcher(self._workspace, self)
             self._dispatcher.changed.connect(self._publish_snapshot)
             self._host = HostService(config, self._last_info, self._dispatcher, viewer_token=self._health_token)
         except (ValueError, RuntimeError) as exc:
-            if self._lease is not None:
-                self._lease.unlock()
-                self._lease = None
+            for lease in self._leases:
+                lease.unlock()
+            self._leases.clear()
             self._show_host_status("error", str(exc))
             return
         self._show_host_status("starting", "正在启动服务…")
@@ -213,9 +217,9 @@ class WorkspacePanel(QDockWidget):
             self._publish_snapshot()
 
     def _release_host_lease(self):
-        if self._lease is not None:
-            release_when_idle(self._lease, self._host, self._workspace.processing)
-            self._lease = None
+        for lease in self._leases:
+            release_when_idle(lease, self._host, self._workspace.processing)
+        self._leases.clear()
 
     def _publish_snapshot(self):
         snapshot = host_info()
@@ -277,7 +281,7 @@ class WorkspacePanel(QDockWidget):
         self.start_host.setEnabled(not hosting and not connecting)
         self.stop_host.setEnabled(hosting and self._host_state != "stopping")
         self.connect_button.setEnabled(not hosting and not connecting)
-        self.managed_connect.setEnabled(not hosting and not connecting)
+        self.direct_connect.setEnabled(not hosting and not connecting)
         self.disconnect_button.setEnabled(connecting)
         for field in self._host_fields:
             field.setEnabled(not hosting)

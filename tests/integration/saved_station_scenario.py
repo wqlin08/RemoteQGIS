@@ -5,6 +5,7 @@
 import json
 import os
 from pathlib import Path
+import secrets
 import traceback
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ identifier = uuid4().hex
 timer = QTimer()
 panel = None
 requested = False
+checked_rejection = False
 
 
 def failed():
@@ -38,13 +40,13 @@ def setup():
 
         account = "client-" + identifier
         try:
-            save_token(account, token)
+            save_token(account, secrets.token_urlsafe(32))
             panel.stations.profiles[identifier] = {
                 "name": "隔离工作站", "host": "127.0.0.1", "port": config["port"],
                 "manager_port": config["manager_port"], "tls": False,
             }
             panel.stations.persist(identifier)
-            panel.stations.use.click()
+            panel.connect_button.click()
             settings = panel.stations.settings.value("remoteqgis/workstations")
             assert token not in settings
             assert panel.stations.pending is not None
@@ -57,8 +59,16 @@ def setup():
 
 
 def tick():
-    global requested
+    global requested, checked_rejection
     try:
+        if not checked_rejection:
+            if panel._client_state != "error":
+                return
+            assert "拒绝了访问令牌" in panel.client_status.text(), panel.client_status.text()
+            checked_rejection = True
+            panel.remote_token.setText(token)
+            panel.connect_button.click()
+            return
         assert panel._client_state != "error", panel.client_status.text()
         if not panel._connection.ready:
             return
