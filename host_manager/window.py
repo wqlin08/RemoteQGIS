@@ -48,6 +48,7 @@ class Window(QWidget):
         self.command = ""
         self.current = None
         self.startup_checks = 0
+        self.retry_daemon = False
         self.waiting_for_address = False
         self.tray = QSystemTrayIcon(QApplication.windowIcon(), self)
         menu = QMenu(self)
@@ -200,9 +201,10 @@ class Window(QWidget):
             remove_macos_loaded()
         self.settings = settings
 
-    def start_daemon(self):
+    def start_daemon(self, *, retry=True):
         self.daemon_process = spawn(manager_command(self.home), self.home / "manager.log",
                                     env=python_env(), detached=True)
+        self.retry_daemon = retry and os.name == "nt"
         self.startup_checks = 12
         self.status.setText("正在启动管理服务。")
         self.update_controls()
@@ -243,6 +245,18 @@ class Window(QWidget):
                 self.status.setText("管理服务已就绪，等待客户端连接。")
             else:
                 self.status.setText(value.get("detail", ""))
+        elif self.daemon_process is not None and self.daemon_process.poll() not in (None, 0):
+            code = self.daemon_process.returncode
+            self.startup_checks = 0
+            if self.retry_daemon and code & 0xFFFFFFFF == 0xC0000005:
+                self.retry_daemon = False
+                try:
+                    self.start_daemon(retry=False)
+                    return
+                except OSError as exc:
+                    self.status.setText(f"无法重试启动管理服务（{exc}）。")
+            else:
+                self.status.setText(f"管理服务未完成启动（退出码 {code}）。详见 manager.log。")
         elif self.startup_checks:
             self.startup_checks -= 1
         elif status == 401:
@@ -269,8 +283,9 @@ class Window(QWidget):
         locked = value is not None or bool(self.startup_checks)
         self.token_field.setReadOnly(locked)
         self.regenerate.setEnabled(not locked)
-        self.start.setEnabled(value is not None and not value["requested"] and value["state"] != "stopping")
-        self.stop.setEnabled(value is not None and value["requested"])
+        desktop = value is not None and value.get("desktop_active", value["requested"])
+        self.start.setEnabled(value is not None and not desktop and not value["requested"])
+        self.stop.setEnabled(bool(desktop) and value["state"] != "stopping")
         self.shutdown.setEnabled(value is not None and bool(self.control))
         self.tray_shutdown.setEnabled(self.shutdown.isEnabled())
         self.tray.setToolTip(f"{TITLE}\n{self.status.text()}")

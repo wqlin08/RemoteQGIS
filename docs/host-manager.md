@@ -4,7 +4,7 @@ Host Manager 使用工作站已安装的 QGIS 3.40 或更新的 3.x 版本。管
 
 ## 安装与首次配置
 
-Windows x64 双击发行文件 `RemoteQGIS-Host-Manager-Windows-x64-1.1.0-rc5-Setup.exe`。安装完成后，选择 QGIS 的安装目录，例如 `D:\QGIS`。程序会检查该目录中的 QGIS Desktop 与 Python 启动脚本。升级前退出旧管理服务，并退出管理界面。Windows 安装程序会建立当前用户的开始菜单入口。
+Windows x64 双击发行文件 `RemoteQGIS-Host-Manager-Windows-x64-1.1.0-rc6-Setup.exe`。安装完成后，选择 QGIS 的安装目录，例如 `D:\QGIS`。程序会检查该目录中的 QGIS Desktop 与 Python 启动脚本。升级前退出旧管理服务，并退出管理界面。Windows 安装程序会建立当前用户的开始菜单入口。
 
 macOS 解压发行 ZIP，将 `RemoteQGIS Host Manager.app` 放入「应用程序」。首次打开时选择已安装的 `QGIS-LTR.app` 或 `QGIS.app`。构建和测试时可通过 `REMOTEQGIS_QGIS_APP` 指定安装路径。
 
@@ -17,6 +17,8 @@ macOS 解压发行 ZIP，将 `RemoteQGIS Host Manager.app` 放入「应用程序
 连接后，在「远程工作区」点击「工作空间」，可以进入已配置的其他授权目录或浏览它们的子目录，最后选择「使用当前目录」。选择会保存在工作站。切换时会清空当前远端项目，未保存的项目、进行中的矢量编辑或处理任务会阻止切换。文件浏览和处理输出均以当前工作空间为基准。在客户端调整 RemoteQGIS 分组里的图层顺序，远端图层树和绘制顺序会同步更新。
 
 关闭远端 QGIS 或退出管理服务时，QGIS 的保存提示用于确认未保存项目。选择取消会中止关闭，远端 QGIS、Host 和未保存项目继续保留。
+
+管理器在托管插件确认 GIS 端口已监听后显示「QGIS Desktop 已就绪」。如果窗口已经打开但插件或 GIS 服务超时，管理器显示具体阶段并保留该窗口。主动请求关闭后，如 QGIS 尚未确认，管理器会提示在工作站查看保存对话框或从 QGIS 菜单退出。Windows 初次启动失败时，可在「打开日志目录」中查看 `launcher.log`、`manager-crash.log`、`manager.log` 和 `host.log`。
 
 影像默认按需读取原始波段。选中远端影像图层，在「显示方式」中可切换到「快速瓦片预览」或重试原始波段。瓦片由工作站渲染，原始像元查询仍读取工作站数据。使用原生波段属性、分类色表或伪彩色编辑时切回原始波段。
 

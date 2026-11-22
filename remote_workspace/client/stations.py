@@ -185,8 +185,10 @@ class Stations(QWidget):
         key = self.pending = object()
         self.panel._client_status("connecting", "正在检查工作站管理服务…")
         deadline = time.monotonic() + 70
+        started = False
 
         def result(value, status):
+            nonlocal started
             if self.pending is not key:
                 return
             if not value:
@@ -200,7 +202,9 @@ class Stations(QWidget):
                 else:
                     self.panel._client_status("error", f"管理服务请求失败（HTTP {status or '超时'}）。")
                 return
-            if value.get("port_in_use"):
+            if (value.get("port_in_use") or value["state"] == "stopping"
+                    or (value["state"] == "error" and (started or value.get("desktop_active"))
+                        and (value.get("start_failed") or not value.get("requested")))):
                 self.pending = None
                 self.panel._client_status("error", value["detail"])
                 return
@@ -217,6 +221,7 @@ class Stations(QWidget):
                 self.panel._client_status("error", value.get("detail") or "远端 QGIS 启动超时。")
                 return
             if not value.get("requested"):
+                started = True
                 self.requests.call(manager, token, "manager_start", {}, result)
                 return
             self.panel._client_status("connecting", value.get("detail") or "正在等待远端 QGIS 就绪…")

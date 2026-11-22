@@ -42,7 +42,6 @@ def main():
         shared.mkdir()
         another = home / "其他数据"
         (another / "子目录").mkdir(parents=True)
-        quiet_profile(home / "desktop", "remoteqgis-host")
         if args.client_zip:
             quiet_profile(home / "client-profiles", "managed-client")
         launcher = str(args.launcher.resolve())
@@ -56,6 +55,8 @@ def main():
                   "additional_directories": [str(another)]}
         (home / "settings.json").write_text(json.dumps(config), encoding="utf-8")
         token, control = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        subprocess.run([launcher, "--python", str(ROOT / "tests/integration/manager_readiness_scenario.py"),
+                        str(home)], timeout=15, check=True)
 
         def state(name):
             result = rpc(manager_port, token, "manager_status")
@@ -78,7 +79,18 @@ def main():
             wait_for(lambda: ready(manager_port, token) or proc.poll() is not None)
             assert proc.poll() is None, proc.stdout.read()
             assert state("stopped")
+            rpc(manager_port, token, "manager_start")
+            wait_for(lambda: state("running"))
+            assert ready(gis_port, token)
+            assert next(home.glob("desktop-*.ready")).is_file()
+            algorithms = rpc(gis_port, token, "processing_catalog")["algorithms"]
+            assert {"native:buffer", "gdal:slope"} <= set(algorithms), algorithms
+            rpc(manager_port, token, "manager_stop", {"control": control})
+            wait_for(lambda: state("stopped"))
+            quiet_profile(home / "desktop", "remoteqgis-host")
             with socket.socket() as occupied:
+                if os.name == "posix":
+                    occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 occupied.bind(("127.0.0.1", gis_port))
                 occupied.listen()
                 rpc(manager_port, token, "manager_start")

@@ -23,9 +23,11 @@ from remote_workspace.host.dependencies import load_tornado
 from remote_workspace.host.dispatch import Dispatcher
 from remote_workspace.host.service import HostService, PORT_IN_USE_EXIT_CODE, port_in_use_message
 
-from .process import SOURCE, spawn
+from .process import SOURCE, close_desktop_window, spawn
 
 HTTP = build_opener(ProxyHandler({}))
+START_TIMEOUT = 60
+STOP_TIMEOUT = 12
 
 
 def desktop_runtime(home):
@@ -46,6 +48,7 @@ def desktop_runtime(home):
     path.parent.mkdir(parents=True, exist_ok=True)
     settings = QSettings(str(path), QSettings.IniFormat)
     settings.setValue("PythonPlugins/remoteqgis_managed", True)
+    settings.setValue("PythonPlugins/processing", True)
     settings.setValue("fonts/downloadMissingFonts", False)
     settings.sync()
     if settings.status() != QSettings.NoError:
@@ -70,6 +73,8 @@ class Manager:
         self.health_token = ""
         self.failure_count = 0
         self.retry_at = self.deadline = self.next_health = 0
+        self.stop_deadline = 0
+        self.start_failed = self.was_ready = False
         self.dispatcher = Dispatcher(self)
         load_tornado()
         config = HostConfig(self.config.address, settings.manager_port, self.config.shared_directory, token)
@@ -84,9 +89,12 @@ class Manager:
             if self.closing:
                 raise WorkspaceError("管理服务正在停止。", 409)
             if not self.wanted:
+                if self.worker is not None:
+                    return self.status()
                 self.failure_count = 0
                 self.retry_at = 0
                 self.port_in_use = False
+                self.start_failed = False
             self.wanted = True
         elif operation in ("manager_stop", "manager_shutdown"):
             control = data.get("control")
@@ -94,6 +102,8 @@ class Manager:
                 raise WorkspaceError("需要工作站本地控制凭据。", 403)
             self.wanted = False
             self.port_in_use = False
+            if self.stop_deadline < 0:
+                self.stop_deadline = 0
             if operation == "manager_shutdown":
                 self.closing = True
         elif operation != "manager_status":
@@ -102,8 +112,9 @@ class Manager:
 
     def status(self):
         return {"manager": 1, "state": self.worker_state, "detail": self.detail, "port": self.config.port,
-                "requested": self.wanted,
-                "port_in_use": self.port_in_use}
+                "requested": self.wanted and not self.start_failed,
+                "port_in_use": self.port_in_use, "start_failed": self.start_failed,
+                "desktop_active": self.worker is not None}
 
     def launch_worker(self):
         executable = os.environ.get("REMOTEQGIS_DESKTOP", "")
@@ -134,13 +145,23 @@ class Manager:
             launch.unlink(missing_ok=True)
             raise
         self.worker_state, self.detail = "starting", "正在启动 QGIS Desktop。"
-        self.deadline = time.monotonic() + 60
+        self.deadline = time.monotonic() + START_TIMEOUT
+        self.next_health = 0
+        self.was_ready = self.start_failed = False
 
     def stop_worker(self):
-        if self.worker is not None and self.worker_state != "stopping":
+        if self.worker is not None and not self.stop_deadline:
             self.stop_file.touch()
             self.worker_state = "stopping"
+            self.stop_deadline = time.monotonic() + STOP_TIMEOUT
             self.detail = "正在关闭远端 QGIS。若有未保存的改动，请在工作站完成保存。"
+
+    def startup_error(self):
+        with suppress(OSError, ValueError):
+            document = json.loads(self.stop_file.with_suffix(".startup-error").read_text(encoding="utf-8"))
+            if isinstance(document, dict):
+                return document
+        return {}
 
     def healthy(self):
         request = Request(origin(self.config.address, self.config.port) + INFO_PATH,
@@ -155,37 +176,42 @@ class Manager:
     def tick(self):
         code = self.worker.poll() if self.worker is not None else None
         if code is not None:
-            failure = self.stop_file.with_suffix(".startup-error")
-            startup_error = {}
-            with suppress(OSError, ValueError):
-                document = json.loads(failure.read_text(encoding="utf-8"))
-                if isinstance(document, dict):
-                    startup_error = document
-            with suppress(OSError):
-                failure.unlink(missing_ok=True)
-                self.stop_file.with_suffix(".launch").unlink(missing_ok=True)
-            self.stop_file.unlink(missing_ok=True)
-            self.stop_file.with_suffix(".canceled").unlink(missing_ok=True)
+            startup_error = self.startup_error()
+            for suffix in (".launch", ".active", ".ready", ".startup-error", ".canceled", ".stop"):
+                self.stop_file.with_suffix(suffix).unlink(missing_ok=True)
             self.worker = self.stop_file = None
+            self.stop_deadline = 0
             if self.wanted and (code == PORT_IN_USE_EXIT_CODE or startup_error.get("port_in_use")):
                 self.wanted = False
                 self.port_in_use = True
-                self.worker_state, self.detail = "error", port_in_use_message(self.config)
-            elif self.wanted and (code != 0 or startup_error):
+                self.fail_start(port_in_use_message(self.config))
+            elif self.wanted and code != 0 and self.was_ready and not startup_error:
                 self.failure_count += 1
                 self.retry_at = time.monotonic() + min(30, 2 ** min(self.failure_count, 5))
                 self.worker_state = "error"
-                self.detail = startup_error.get("detail") or f"QGIS 已退出（{code}），即将重试。详见 host.log。"
+                self.detail = f"QGIS 已退出（{code}），即将重试。详见 host.log。"
+            elif self.wanted and (startup_error or not self.was_ready):
+                self.wanted = False
+                self.fail_start(startup_error.get("detail") or f"QGIS 在就绪前已退出（{code}）。详见 host.log。")
             else:
                 self.wanted = False
+                self.start_failed = False
                 self.worker_state, self.detail = "stopped", ""
-        if self.worker_state == "stopping" and self.stop_file is not None:
+        if self.stop_deadline:
             canceled = self.stop_file.with_suffix(".canceled")
             if canceled.exists():
                 canceled.unlink()
                 self.wanted = True
                 self.closing = False
-                self.worker_state, self.detail = "running", "远端 QGIS 取消了关闭。"
+                self.stop_deadline = 0
+                self.worker_state = "error" if self.start_failed else ("running" if self.was_ready else "starting")
+                self.detail = "远端 QGIS 取消了关闭。"
+            elif 0 < self.stop_deadline <= time.monotonic():
+                self.stop_deadline = -1
+                self.worker_state = "error"
+                if not self.stop_file.with_suffix(".active").is_file():
+                    close_desktop_window(self.worker.pid, self.home / "host.log")
+                self.detail = "远端 QGIS 尚未确认关闭。请处理工作站上的提示，或在 QGIS 中选择退出。"
         if self.closing or self.service.status.state == "error":
             self.wanted = False
             self.stop_worker()
@@ -198,27 +224,48 @@ class Manager:
                     self.app.exit(int(self.service.status.state == "error"))
         elif not self.wanted:
             self.stop_worker()
-            if self.worker is None and not self.port_in_use:
+            if self.worker is None and not self.start_failed:
                 self.worker_state, self.detail = "stopped", ""
         elif self.worker is None and time.monotonic() >= self.retry_at:
             try:
                 self.launch_worker()
             except OSError as exc:
-                self.retry_at = time.monotonic() + 5
-                self.worker_state, self.detail = "error", f"无法启动 Host（{exc}）。"
-        elif self.worker_state == "starting":
-            if self.healthy():
-                self.failure_count = 0
+                self.wanted = False
+                self.fail_start(f"无法启动 Host（{exc}）。")
+        elif self.worker is not None and not self.stop_deadline:
+            self.check_desktop()
+
+    def fail_start(self, detail):
+        if not self.start_failed or self.detail != detail:
+            print(detail, file=sys.stderr, flush=True)
+        self.start_failed = True
+        self.worker_state, self.detail = "error", detail
+
+    def check_desktop(self):
+        error = self.startup_error()
+        if error:
+            self.port_in_use = bool(error.get("port_in_use"))
+            self.fail_start(error.get("detail") or "QGIS 托管服务初始化失败。详见 host.log。")
+            return
+        now = time.monotonic()
+        # A listener confirmation from the QGIS process also works when Windows
+        # cannot connect to its own VPN address.
+        if self.stop_file.with_suffix(".ready").is_file() or (now >= self.next_health and self.healthy()):
+            self.failure_count = 0
+            self.start_failed = False
+            self.was_ready = True
+            if self.worker_state != "running":
                 self.worker_state, self.detail = "running", "QGIS Desktop 已就绪。"
-                self.next_health = time.monotonic() + 4
-            elif time.monotonic() >= self.deadline:
-                self.stop_worker()
-        elif self.worker_state in ("running", "error") and time.monotonic() >= self.next_health:
-            if self.healthy():
-                self.worker_state, self.detail = "running", "QGIS Desktop 已就绪。"
-            else:
-                self.worker_state, self.detail = "error", "QGIS Desktop 正在运行，GIS 端口暂未通过健康检查。"
-            self.next_health = time.monotonic() + 4
+            self.next_health = now + 4
+        elif now >= self.deadline or self.was_ready:
+            detail = ("QGIS 进程已启动，但托管插件尚未加载。请检查工作站的 QGIS 窗口和 host.log。"
+                      if not self.stop_file.with_suffix(".active").is_file() else
+                      "QGIS 托管插件已加载，但 GIS 服务未就绪。请检查工作站的 QGIS 窗口和 host.log。")
+            self.fail_start(detail)
+            if now >= self.next_health:
+                self.next_health = now + 4
+        elif self.stop_file.with_suffix(".active").is_file():
+            self.detail = "QGIS 托管插件已加载，正在启动 GIS 服务。"
 
 
 def interactive_desktop():

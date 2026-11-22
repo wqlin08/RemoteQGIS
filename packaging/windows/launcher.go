@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -123,6 +124,21 @@ func unattended() bool {
 	return false
 }
 
+func qgisEnvironment() []string {
+	var env []string
+	for _, item := range os.Environ() {
+		key, _, _ := strings.Cut(item, "=")
+		switch strings.ToUpper(key) {
+		case "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYQGIS_STARTUP", "QGIS_PREFIX_PATH",
+			"OSGEO4W_ROOT", "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "QT_QPA_PLATFORM",
+			"GDAL_DATA", "GDAL_DRIVER_PATH", "PROJ_DATA", "PROJ_LIB":
+			continue
+		}
+		env = append(env, item)
+	}
+	return env
+}
+
 func run() error {
 	self, err := os.Executable()
 	if err != nil {
@@ -156,19 +172,47 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	flags := uint32(0x08000000) // CREATE_NO_WINDOW
-	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"))
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: flags,
-		CmdLine:       `cmd.exe /d /v:off /s /c ""%REMOTEQGIS_PYQGIS%" "%REMOTEQGIS_BOOTSTRAP%""`,
-	}
-	cmd.Dir = source
-	cmd.Env = append(os.Environ(), "REMOTEQGIS_MANAGER_LAUNCHER="+self, "REMOTEQGIS_DESKTOP="+desktop,
+	env := append(qgisEnvironment(), "REMOTEQGIS_MANAGER_LAUNCHER="+self, "REMOTEQGIS_DESKTOP="+desktop,
 		"REMOTEQGIS_PYQGIS="+batch, "REMOTEQGIS_BOOTSTRAP="+bootstrap,
-		"REMOTEQGIS_WINDOWS_ARGS="+string(document), "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1", "PYTHONUTF8=1")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("无法启动 QGIS Python 运行环境（%w）", err)
+		"REMOTEQGIS_WINDOWS_ARGS="+string(document), "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1",
+		"PYTHONUTF8=1", "PYTHONFAULTHANDLER=1")
+	showManager := len(args) == 0 || args[0] == "--background"
+	var log *os.File
+	if showManager {
+		logPath := filepath.Join(filepath.Dir(choiceFile()), "launcher.log")
+		if os.MkdirAll(filepath.Dir(logPath), 0700) == nil {
+			log, _ = os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		}
+		if log != nil {
+			defer log.Close()
+		}
+	}
+	start := func() error {
+		cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"))
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+			CmdLine:       `cmd.exe /d /v:off /s /c ""%REMOTEQGIS_PYQGIS%" "%REMOTEQGIS_BOOTSTRAP%""`,
+		}
+		cmd.Dir, cmd.Env = source, env
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if log != nil {
+			cmd.Stdout, cmd.Stderr = log, log
+		}
+		return cmd.Run()
+	}
+	runtimeError := start()
+	if exit, ok := runtimeError.(*exec.ExitError); showManager && ok && uint32(exit.ExitCode()) == 0xC0000005 {
+		if log != nil {
+			fmt.Fprintln(log, time.Now().Format(time.RFC3339), "QGIS Python native access violation; retrying once.")
+		}
+		time.Sleep(time.Second)
+		runtimeError = start()
+	}
+	if runtimeError != nil {
+		if log != nil {
+			fmt.Fprintln(log, time.Now().Format(time.RFC3339), runtimeError)
+		}
+		return fmt.Errorf(`无法启动 QGIS Python 运行环境（%w）。日志位于 %%LOCALAPPDATA%%\RemoteQGIS Host。`, runtimeError)
 	}
 	return nil
 }

@@ -31,4 +31,19 @@ def python_env():
 
 
 def manager_command(home):
-    return [sys.executable, "-m", "host_manager", "--state-dir", str(home), "--daemon"]
+    diagnostics = ["-X", "faulthandler"] if os.name == "nt" else []
+    return [sys.executable, *diagnostics, "-m", "host_manager", "--state-dir", str(home), "--daemon"]
+
+
+def close_desktop_window(pid, log):
+    if os.name != "nt":
+        return
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    command = f"$p = Get-Process -Id {pid:d} -ErrorAction SilentlyContinue; if ($p) {{ [void]$p.CloseMainWindow() }}"
+    try:
+        with log.open("ab") as output:
+            subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command", command],
+                           stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"无法向 QGIS 窗口发送关闭请求（{exc}）。", file=sys.stderr, flush=True)
